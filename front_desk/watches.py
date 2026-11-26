@@ -158,6 +158,6 @@ _CODE = re.compile(r"^\s*([A-Z]{1,5}-?\d{1,6})\b")
 
 
 def card_code(task_id: str, title: str) -> str:
-    """The short code a person uses for a card: a leading 'A667'-style tag, else the card id."""
+    """The short code a person uses for a card: a leading 'A101'-style tag, else the card id."""
     m = _CODE.match(title or "")
     return m.group(1) if m else str(task_id)
