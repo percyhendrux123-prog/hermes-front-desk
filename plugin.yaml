@@ -1,6 +1,6 @@
 name: front-desk
 label: Front Desk
-version: 0.1.0
+version: 0.2.0
 manifest_version: 2
 api_version: 1
 description: >
@@ -8,8 +8,10 @@ description: >
   person you named, or a lane that calls front_desk_escalate) reaches the orchestrator's live
   session first. The orchestrator decides: handle it, or tell the boss. Your notification
   settings decide when and where you hear: in the chat you're in when you're at the computer,
-  your phone chat when you're away and it's urgent, otherwise the next digest. Edit the settings
-  in plain words with /notify. Never messages anyone but you and approves nothing.
+  your phone chat when you're away and it's urgent, otherwise the morning brief. A check every few
+  hours runs your standing watches and stays silent unless something needs you. Edit the settings
+  in plain words with /notify, including corrections with a reason. Money and approval sends are
+  locked: they always reach you. Never messages anyone but you and approves nothing.
 author: AXIOM
 license: MIT
 tags: [notifications, escalation, triage, kanban, orchestrator, presence]

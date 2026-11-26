@@ -16,6 +16,15 @@ from .policy import Event, classify, match_person
 KANBAN_KINDS = ("blocked", "completed", "review_requested", "crashed", "gave_up", "timed_out",
                 "block_loop_detected")
 CRON_OK = {None, "ok", "cancelled", "skipped", "silent"}
+DESK_AUTHOR = "front-desk"   # cards the desk itself made (watch cards) are never its own intake
+WAITING_ON_BOSS = (None, "", "needs_input", "capability")
+
+
+def _has_col(con, table: str, col: str) -> bool:
+    try:
+        return any(r[1] == col for r in con.execute(f"PRAGMA table_info({table})"))
+    except sqlite3.Error:
+        return False
 
 
 def _short(text: Any, n: int = 280) -> str:
@@ -34,11 +43,13 @@ def poll_kanban(db_path: Path, cursor: Optional[int], settings: dict) -> tuple[l
             top = con.execute("SELECT COALESCE(MAX(id), 0) FROM task_events").fetchone()[0]
             return [], int(top)
         marks = ",".join("?" for _ in KANBAN_KINDS)
+        by = "COALESCE(t.created_by, '')" if _has_col(con, "tasks", "created_by") else "''"
         rows = con.execute(
             f"""SELECT e.id, e.task_id, e.run_id, e.kind, e.payload, t.title, t.assignee
                 FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id
-                WHERE e.id > ? AND e.kind IN ({marks}) ORDER BY e.id LIMIT 500""",
-            (cursor, *KANBAN_KINDS),
+                WHERE e.id > ? AND e.kind IN ({marks}) AND {by} != ?
+                ORDER BY e.id LIMIT 500""",
+            (cursor, *KANBAN_KINDS, DESK_AUTHOR),
         ).fetchall()
         top = con.execute("SELECT COALESCE(MAX(id), ?) FROM task_events", (cursor,)).fetchone()[0]
     finally:
@@ -113,3 +124,37 @@ def poll_cron(jobs_path: Path, seen: Optional[dict], settings: dict) -> tuple[li
             detail=detail, source="cron", ref=jid, person=match_person(f"{name} {detail}", settings),
         ))
     return out, seen
+
+
+def blocked_on_boss(db_path: Path) -> list[dict]:
+    """Cards blocked on a person right now (needs_input / capability / unspecified), with when
+    they were blocked. Read-only. Waiting on another card or a flaky failure is not the boss's."""
+    if db_path is None or not Path(db_path).exists():
+        return []
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+    try:
+        by = "COALESCE(t.created_by, '')" if _has_col(con, "tasks", "created_by") else "''"
+        rows = con.execute(
+            f"""SELECT t.id, t.title, e.id, e.created_at, e.payload
+               FROM tasks t JOIN task_events e ON e.id = (
+                   SELECT MAX(id) FROM task_events WHERE task_id = t.id AND kind = 'blocked')
+               WHERE t.status = 'blocked' AND {by} != ?
+               ORDER BY e.created_at""",
+            (DESK_AUTHOR,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        con.close()
+    from .watches import card_code
+    out = []
+    for task_id, title, eid, created, payload in rows:
+        try:
+            kind = (json.loads(payload or "{}") or {}).get("kind")
+        except ValueError:
+            kind = None
+        if kind not in WAITING_ON_BOSS:
+            continue
+        out.append({"task_id": task_id, "code": card_code(task_id, title or ""), "title": title or task_id,
+                    "since": float(created), "block_event_id": int(eid)})
+    return out

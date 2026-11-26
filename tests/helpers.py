@@ -15,6 +15,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from front_desk import settings as settings_mod  # noqa: E402
+
+try:
+    import yaml  # noqa: F401
+    HAVE_YAML = True
+except ImportError:  # bare Python: YAML-only tests skip with this message, the rest run
+    HAVE_YAML = False
+NO_YAML = "PyYAML not installed; run: uv run --no-project --python 3.12 --with pyyaml python -m unittest discover -s tests"
 from front_desk.desk import Desk  # noqa: E402
 from front_desk.policy import Event  # noqa: E402
 from front_desk.store import Store  # noqa: E402
@@ -53,7 +60,8 @@ class Recorder:
 
 
 def base_settings(**over) -> dict:
-    raw = {"timezone": TZ, "phone": {"session_key": PHONE_KEY}, "quiet_hours": {"start": "22:00", "end": "07:00"}}
+    raw = {"timezone": TZ, "phone": {"session_key": PHONE_KEY}, "quiet_hours": {"start": "22:00", "end": "07:00"},
+           "digest_times": ["09:00", "17:00"]}
     raw.update(over)
     return settings_mod.normalize(raw)
 

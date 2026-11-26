@@ -76,7 +76,7 @@ class SettingsFile(unittest.TestCase):
 
     def test_describe_is_plain_english(self):
         text = settings_mod.describe(s())
-        self.assertIn("finished cards: put it in the next digest", text)
+        self.assertIn("finished cards: put it in the morning brief", text)
         self.assertIn("Phone chat: not set", text)
 
 

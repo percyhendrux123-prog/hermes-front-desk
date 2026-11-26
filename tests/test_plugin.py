@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import helpers  # noqa: F401
+from helpers import HAVE_YAML, NO_YAML
 
 ROOT = Path(__file__).resolve().parents[1]
 _n = 0
@@ -76,6 +77,7 @@ class Wiring(unittest.TestCase):
         for k in ("hermes_cli", "hermes_cli.plugin_session"):
             sys.modules.pop(k, None)
 
+    @unittest.skipUnless(HAVE_YAML, NO_YAML)
     def test_registers_what_the_manifest_declares(self):
         import yaml
         ctx = FakeCtx()
@@ -147,7 +149,7 @@ class Wiring(unittest.TestCase):
     def test_gateway_observer_never_skips_and_stores_no_text(self):
         ctx = FakeCtx()
         _, p, _, _ = load_plugin(ctx)
-        p.settings_path.write_text("people:\n  - name: Dana Reyes\n    match: [dana]\n")
+        p.settings_path.write_text(json.dumps({"people": [{"name": "Dana Reyes", "match": ["dana"]}]}))  # JSON is YAML
         src = types.SimpleNamespace(platform=types.SimpleNamespace(value="telegram"), user_name="Dana",
                                     user_id="5", chat_id="9")
         ev = types.SimpleNamespace(source=src, message_id="77", text="SECRET-BODY-TEXT")
@@ -163,7 +165,7 @@ class Wiring(unittest.TestCase):
     def test_redelivered_message_without_an_id_dedupes(self):
         ctx = FakeCtx()
         _, p, _, _ = load_plugin(ctx)
-        p.settings_path.write_text("people:\n  - name: Dana Reyes\n    match: [dana]\n")
+        p.settings_path.write_text(json.dumps({"people": [{"name": "Dana Reyes", "match": ["dana"]}]}))  # JSON is YAML
         import time as _t
         p._last_pump = _t.time()
         src = types.SimpleNamespace(platform="telegram", user_name="Dana", user_id="5", chat_id="9")
@@ -172,6 +174,68 @@ class Wiring(unittest.TestCase):
         ctx.hooks["pre_gateway_dispatch"](event=ev)
         p.drain_inbound()
         self.assertEqual(len(p.desk.store.rows()), 1)
+
+    def test_correction_with_a_reason_is_offered_then_saved_on_yes(self):
+        ctx = FakeCtx(viewers=[{"idle_seconds": 2}])
+        _, p, _, _ = load_plugin(ctx)
+        notify = ctx.commands["notify"]
+        self.assertIn("no rule waiting", notify("yes"))
+        self.assertIn("don't have a recent alert", notify("that could have waited, x"))
+        ctx.hooks["pre_llm_call"](user_message="hi", platform="desktop")
+        eid = json.loads(ctx.tools["front_desk_escalate"]({"category": "deploy", "title": "Release R2 went out"}))["id"]
+        json.loads(ctx.tools["front_desk_triage"]({"event_id": eid, "decision": "tell_boss"}))
+        offer = notify("that could have waited, releases only matter to me when one fails")
+        self.assertIn(f"alert #{eid}", offer)
+        self.assertEqual(p.settings()["rules"], [])  # nothing saved before the yes
+        saved = notify("yes")
+        self.assertIn("Undo: /notify forget rule 1", saved)
+        self.assertEqual(p.settings()["rules"][0]["reason"], "releases only matter to me when one fails")
+        self.assertIn("Saved rules", notify(""))
+        self.assertIn("no rule waiting", notify("yes"))  # a yes is used once
+        self.assertIn("Forgot rule 1", notify("forget rule 1"))
+        self.assertEqual(p.settings()["rules"], [])
+
+    def test_offer_expires(self):
+        ctx = FakeCtx(viewers=[{"idle_seconds": 2}])
+        mod, p, _, _ = load_plugin(ctx)
+        ctx.hooks["pre_llm_call"](user_message="hi", platform="desktop")
+        eid = json.loads(ctx.tools["front_desk_escalate"]({"category": "deploy", "title": "Release R3"}))["id"]
+        ctx.tools["front_desk_triage"]({"event_id": eid, "decision": "tell_boss"})
+        ctx.commands["notify"]("that could have waited")
+        pending = p.desk.store.get("pending_rule")
+        pending["ts"] -= mod.PENDING_RULE_S + 1
+        p.desk.store.put("pending_rule", pending)
+        self.assertIn("no rule waiting", ctx.commands["notify"]("yes"))
+        self.assertEqual(p.settings()["rules"], [])
+
+    def test_floor_refusal_says_why_and_changes_nothing(self):
+        ctx = FakeCtx()
+        _, p, _, _ = load_plugin(ctx)
+        msg = ctx.commands["notify"]("never show money")
+        self.assertIn("didn't change anything", msg)
+        self.assertIn("always reach you", msg)
+        self.assertFalse(p.settings_path.exists())
+
+    def test_broken_floor_in_the_file_keeps_the_last_good_settings(self):
+        ctx = FakeCtx()
+        _, p, _, _ = load_plugin(ctx)
+        p.settings_path.write_text(json.dumps({"levels": {"money": "never"}}))
+        self.assertEqual(p.settings()["levels"]["money"], "interrupt")
+        self.assertIn("always reach you", ctx.commands["notify"](""))
+
+    def test_answered_and_watch_phrases(self):
+        ctx = FakeCtx()
+        _, p, _, _ = load_plugin(ctx)
+        p.settings_path.write_text(json.dumps({"people": [{"name": "Dana Reyes", "match": ["dana"]}]}))
+        self.assertIn("Marked Dana Reyes as answered", ctx.commands["notify"]("answered Dana Reyes"))
+        self.assertIn("isn't in your people list", ctx.commands["notify"]("answered Lee"))
+        self.assertIn("Undo: /notify stop watching 1",
+                      ctx.commands["notify"]("watch Dana Reyes not answered in 2 days"))
+        self.assertEqual(p.settings()["responsibilities"][0]["person"], "Dana Reyes")
+
+    def test_no_kanban_api_means_no_watch_cards(self):
+        _, p, _, _ = load_plugin(FakeCtx())
+        self.assertIsNone(p.desk.board)
 
     def test_delivery_only_targets_the_given_session_or_phone(self):
         ctx = FakeCtx()

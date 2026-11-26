@@ -176,7 +176,7 @@ class Overrides(DeskCase):
                                             chat_id="9", message_id="2"))
 
     def test_override_ignores_a_digest_level_setting(self):
-        self.cfg = base_settings(levels={"money": "never"})
+        self.cfg = base_settings(levels={"money": "digest"})
         self.make_state_db(self.clock() - 3600)
         eid = self.desk.ingest(self.ev(category="money"))
         self.assertEqual(self.desk.store.row(eid)["status"], "notify")

@@ -5,13 +5,15 @@ from dataclasses import dataclass
 from datetime import datetime, time as dtime
 from typing import Optional
 
-from .settings import CATEGORIES
+from .settings import CATEGORIES, FLOORS
+
+_RANK = {"never": 0, "log": 1, "digest": 2, "interrupt": 3}
 
 # Kanban-derived base categories that keyword rules may refine. A finished card stays a
 # finished card: Kanban already tells the card's creator, and a "deploy" word in a done
 # card's summary is not a live change waiting on anyone.
 _REFINABLE = {"card_needs_input", "card_failed", "other"}
-_REFINE_ORDER = ("money", "client_escalation", "deploy")
+_REFINE_ORDER = ("money", "approval", "client_escalation", "deploy")
 
 
 @dataclass
@@ -23,6 +25,7 @@ class Event:
     source: str = ""        # kanban | cron | inbound | tool | cli
     ref: str = ""           # card id, job id, ...
     person: str = ""        # a named person this is from/about, if matched
+    level: str = ""         # a watch's own level; empty = the category's level
 
 
 def match_person(text: str, settings: dict) -> str:
@@ -56,10 +59,36 @@ def is_override(ev: Event, settings: dict) -> bool:
     return bool(ev.person and ev.person.lower() in names)
 
 
+def rule_for(ev: Event, settings: dict) -> Optional[tuple[int, dict]]:
+    """The newest saved correction rule that matches, as (number, rule). Numbers start at 1."""
+    found = None
+    for i, r in enumerate(settings.get("rules") or [], start=1):
+        if r.get("category") != ev.category:
+            continue
+        if r.get("person") and r["person"].lower() != (ev.person or "").lower():
+            continue
+        if r.get("watch") and not ev.key.startswith(f"watch:{r['watch']}:"):
+            continue
+        found = (i, r)
+    return found
+
+
+def floor(category: str, level: str) -> str:
+    """Locked floors: money and approval sends never drop below the digest."""
+    if category in FLOORS and _RANK.get(level, 0) < _RANK["digest"]:
+        return "digest"
+    return level
+
+
 def level_for(ev: Event, settings: dict) -> str:
     if is_override(ev, settings):
         return "interrupt"
-    return settings["levels"].get(ev.category, settings["levels"]["other"])
+    hit = rule_for(ev, settings)
+    if hit:
+        return floor(ev.category, hit[1]["level"])
+    if ev.level:
+        return floor(ev.category, ev.level)
+    return floor(ev.category, settings["levels"].get(ev.category, settings["levels"]["other"]))
 
 
 def _hhmm(s: str) -> dtime:
@@ -104,6 +133,14 @@ def route(urgency: str, presence: str, override: bool, now: datetime, settings: 
     if channel == "phone" and phone_target(settings) is None:
         channel = "none"
     return urgency, channel
+
+
+def slot_due(slot: Optional[str], last: Optional[datetime], now: datetime) -> bool:
+    """One daily slot ("07:30"): True once today's slot has passed and ``last`` is before it."""
+    if not slot:
+        return False
+    at = datetime.combine(now.date(), _hhmm(slot), tzinfo=now.tzinfo)
+    return now >= at and (last is None or last < at)
 
 
 def digest_due(last: Optional[datetime], now: datetime, settings: dict) -> bool:

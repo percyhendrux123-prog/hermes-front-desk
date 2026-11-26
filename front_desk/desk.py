@@ -11,28 +11,40 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
-from . import policy, presence as presence_mod, sources
+from . import policy, presence as presence_mod, sources, watches
 from .policy import Event
 from .presence import MARKER, Presence
-from .settings import CATEGORY_LABELS
+from .settings import CATEGORY_LABELS, FLOORS
 from .store import Store
 
 LOCAL_SURFACES = {"cli", "tui", "desktop", "acp", "local", "gui"}
 SHOW_AGAIN_S = 600
 MAX_ATTEMPTS = 3
 LOST_CLAIM_S = 600
+BRIEF_MAX = 25     # digest items per brief; the rest wait for the next one, never dropped
 
 Deliver = Callable[[str, dict], bool]  # (text, {"session_key"} | {"origin"}) -> accepted
+
+
+class Board:
+    """Optional Kanban writer for watch cards. The plugin supplies a real one when the host has
+    the Kanban API; tests supply a fake. Desk code never touches the board's SQLite directly."""
+
+    def ensure_card(self, watch: dict) -> Optional[str]:  # returns a card id
+        raise NotImplementedError
+
+    def comment(self, card_id: str, body: str) -> None:
+        raise NotImplementedError
 
 
 class Desk:
     def __init__(self, *, store: Store, settings: Callable[[], dict], deliver: Deliver,
                  kanban_db: Optional[Path] = None, cron_jobs: Optional[Path] = None,
                  state_db: Optional[Path] = None, full_presence: bool = False,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, board: Optional[Board] = None):
         self.store, self._settings, self._deliver = store, settings, deliver
         self.kanban_db, self.cron_jobs, self.state_db = kanban_db, cron_jobs, state_db
-        self.full_presence, self.clock = full_presence, clock
+        self.full_presence, self.clock, self.board = full_presence, clock, board
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -98,6 +110,7 @@ class Desk:
         ev.category = ev.category if ev.category in s["levels"] else "other"
         override = policy.is_override(ev, s)
         level = policy.level_for(ev, s)
+        hit = None if override else policy.rule_for(ev, s)
         if override:
             status, by = "notify", "always_interrupt"
         elif level == "never":
@@ -113,6 +126,10 @@ class Desk:
                              person=ev.person, status=status, now=self.clock())
         if eid is not None and by:
             self.store.transition(eid, (status,), decided_by=by)
+        if eid is not None and hit:
+            n, rule = hit
+            why = f": {rule['reason']}" if rule.get("reason") else ""
+            self.store.transition(eid, (status,), note=f"boss's rule {n}{why}")
         return eid
 
     def inbound(self, *, platform: str, sender: str, sender_id: str, chat_id: str,
@@ -177,6 +194,7 @@ class Desk:
         if urg == "interrupt" and channel == "in_session" and in_live_session:
             if self.store.transition(row["id"], ("notify",), status="delivered", channel="in_session",
                                      notified_at=self.clock()):
+                self._count_alert(row["id"])
                 return {"ok": True, "status": "delivered", "channel": "in_session",
                         "message": "The boss is here. Tell them in this reply, in one or two plain lines."}
         self.deliver_due()
@@ -188,11 +206,154 @@ class Desk:
     # ------------------------------------------------------------------ the loop
     def pump(self) -> dict:
         """One pass: poll, wake the orchestrator, apply timeouts, deliver, send a due digest."""
-        out = {"ingested": self.poll(), "woke": self.wake(), "timed_out": self.apply_timeouts(),
-               "unconfirmed": self.reap_lost_claims()}
+        out = {"ingested": self.poll()}
+        out["watched"] = self.run_check_if_due()
+        out.update(woke=self.wake(), timed_out=self.apply_timeouts(), unconfirmed=self.reap_lost_claims())
         out["delivered"] = self.deliver_due()
+        out["brief"] = self.send_brief_if_due()
         out["digest"] = self.send_digest_if_due()
         return out
+
+    # ------------------------------------------------------------------ rhythm: checks
+    def run_check_if_due(self) -> int:
+        """Every ``check_every_hours``: evaluate the standing watches. A check sends nothing by
+        itself; a breach becomes an escalation like any other (deduped per breach), so the boss
+        hears only when something needs them. Returns how many new escalations it raised."""
+        s = self.settings
+        hours = float(s.get("check_every_hours") or 0)
+        now = self.clock()
+        last = self.store.get("last_check")
+        if last is None:
+            self.store.put("last_check", now)  # start counting from install
+            return 0
+        if hours <= 0 or now - float(last) < hours * 3600:
+            return 0
+        self.store.put("last_check", now)
+        return self.check_now()
+
+    def check_now(self) -> int:
+        s = self.settings
+        now = self.clock()
+        if not s.get("responsibilities"):
+            return 0
+        blocked = sources.blocked_on_boss(self.kanban_db) if self.kanban_db is not None else []
+        inbound = [dict(r) for r in self.store.rows("category='inbound_person'")]
+        answered = self.store.get("answered") or {}
+        new = 0
+        for w in s["responsibilities"]:
+            card = self._watch_card(w) if w.get("card") else None
+            for ev in watches.evaluate(w, now, blocked_cards=blocked, inbound=inbound, answered=answered):
+                eid = self.ingest(ev)
+                if eid is None:
+                    continue  # this breach already alerted
+                new += 1
+                if card and self.board is not None:
+                    try:
+                        self.board.comment(card, f"Breached: {ev.title} (front desk #{eid})")
+                    except Exception:
+                        pass  # the board is a mirror; the escalation itself is already recorded
+        return new
+
+    def _watch_card(self, w: dict) -> Optional[str]:
+        """The board card that shows a watch, made once (opt-in per watch with ``card: true``)."""
+        if self.board is None:
+            return None
+        key = f"watch_card:{w['id']}"
+        have = self.store.get(key)
+        if have:
+            return have
+        try:
+            cid = self.board.ensure_card(w)
+        except Exception:
+            return None
+        if cid:
+            self.store.put(key, cid)
+        return cid
+
+    def mark_answered(self, person: str) -> str:
+        names = {p["name"].lower(): p["name"] for p in self.settings.get("people", [])}
+        name = names.get(person.strip().lower())
+        if not name:
+            return ""
+        answered = self.store.get("answered") or {}
+        answered[name.lower()] = self.clock()
+        self.store.put("answered", answered)
+        return name
+
+    # ------------------------------------------------------------------ rhythm: the brief
+    def _count_alert(self, event_id: int) -> None:
+        day = self._now_dt(self.clock()).date().isoformat()
+        self.store.put(f"alerts:{day}", int(self.store.get(f"alerts:{day}", 0)) + 1)
+        self.store.put("last_alert", int(event_id))
+
+    def alert_count(self, days_back: int = 0) -> int:
+        from datetime import timedelta
+        day = (self._now_dt(self.clock()).date() - timedelta(days=days_back)).isoformat()
+        return int(self.store.get(f"alerts:{day}", 0))
+
+    def last_alert(self) -> Optional[Any]:
+        eid = self.store.get("last_alert")
+        return self.store.row(int(eid)) if eid is not None else None
+
+    def build_brief(self, since: float, rows: Optional[list] = None) -> str:
+        """The brief's text. ``rows`` = the digest items it carries (default: all waiting, for a
+        preview). Read-only: claiming happens in send_brief_if_due."""
+        now = self.clock()
+        when = self._now_dt(now).strftime("%a %b %d").replace(" 0", " ")
+        lines = [f"{MARKER} Morning brief, {when}."]
+        blocked = sources.blocked_on_boss(self.kanban_db) if self.kanban_db is not None else []
+        if blocked:
+            lines.append(f"Waiting on you ({len(blocked)}):")
+            for c in blocked[:15]:
+                name = c["title"] if c["title"].startswith(c["code"]) else f"{c['code']} · {c['title']}"
+                lines.append(f"- {name[:100]} (blocked {watches.ago(now - c['since'])})")
+        elif self.kanban_db is not None:
+            lines.append("No cards are waiting on you.")
+        rows = self.store.rows("status='digest'") if rows is None else rows
+        if rows:
+            lines.append(f"For you ({len(rows)}):")
+            lines += [_line(r) for r in rows[:BRIEF_MAX]]
+            if len(rows) > BRIEF_MAX:
+                lines.append(f"- and {len(rows) - BRIEF_MAX} more, in the next digest")
+        marks = ",".join("?" for _ in FLOORS)
+        handled = self.store.rows(f"status='handled' AND category IN ({marks}) AND created_at>=?", (*FLOORS, since))
+        if handled:
+            lines.append("Handled for you (money and approvals are always shown):")
+            lines += [_line(r) for r in handled[:15]]
+        y, t = self.alert_count(1), self.alert_count(0)
+        lines.append(f"Alerts: {y} interruption(s) yesterday, {t} so far today. If one could have waited, "
+                     f"say so: /notify that could have waited, <why>")
+        return "\n".join(lines)
+
+    def send_brief_if_due(self) -> int:
+        """Once a day at ``brief.time``: what's blocked on the boss, the digest items, and the
+        alert count. Returns 1 when a brief went out."""
+        b = self.settings.get("brief")
+        now = self.clock()
+        last = self.store.get("last_brief")
+        if last is None:
+            self.store.put("last_brief", now)  # start counting from install, never replay
+            return 0
+        now_dt = self._now_dt(now)
+        if not b or not policy.slot_due(b["time"], self._now_dt(float(last)), now_dt):
+            return 0
+        for r in self.store.rows("status='pending' AND level!='interrupt'"):
+            self.store.transition(r["id"], ("pending",), status="digest", decided_by="brief_time")
+        pres = self.presence()
+        _, channel = policy.route("digest", pres.state, False, now_dt, self.settings)
+        target = self._target(channel, self.live_session())
+        if target is None:
+            return 0  # no channel yet; the brief goes out at the next pass that has one
+        mine = [r for r in self.store.rows("status='digest'")[:BRIEF_MAX]
+                if self.store.transition(r["id"], ("digest",), status="sending", channel=channel, notified_at=now)]
+        ok = self._send(self.build_brief(float(last), mine), target)
+        for r in mine:
+            self.store.transition(r["id"], ("sending",), **({"status": "delivered"} if ok else
+                                                           {"status": "digest", "notified_at": None, "channel": ""}))
+        if ok:
+            self.store.put("last_brief", now)
+            self.store.put("last_digest", now)
+        return 1 if ok else 0
 
     def wake(self) -> int:
         """Urgent pending items go to the orchestrator's live session first, once each."""
@@ -255,6 +416,7 @@ class Desk:
             ok = self._send(_notice(r, channel), target)
             if ok:
                 self.store.transition(r["id"], ("sending",), status="delivered")
+                self._count_alert(r["id"])
                 sent += 1
             else:
                 back = "notify" if r["attempts"] + 1 < MAX_ATTEMPTS else "digest"
@@ -321,7 +483,8 @@ class Desk:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
         p = self.presence()
         live = self.live_session() or {}
-        return {"counts": counts, "presence": p.state, "presence_mode": p.mode, "basis": p.basis,
+        return {"counts": counts, "alerts_today": self.alert_count(0), "alerts_yesterday": self.alert_count(1),
+                "presence": p.state, "presence_mode": p.mode, "basis": p.basis,
                 "live_surface": live.get("surface", ""), "phone_set": policy.phone_target(self.settings) is not None}
 
     # ------------------------------------------------------------------ delivery

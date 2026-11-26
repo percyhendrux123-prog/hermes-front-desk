@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .front_desk import notify_cmd, settings as settings_mod
-from .front_desk.desk import Desk
+from .front_desk.desk import Board, Desk
 from .front_desk.policy import Event, classify, match_person
 from .front_desk.presence import detect_viewers_fn
 from .front_desk.settings import CATEGORIES
@@ -24,6 +24,7 @@ from .front_desk.store import Store
 log = logging.getLogger("front_desk")
 PLUGIN_ID = "front-desk"
 POLL_MIN_S = 20.0
+PENDING_RULE_S = 3600   # a proposed rule waits this long for "/notify yes"
 
 
 def _plugin_session():
@@ -61,6 +62,41 @@ def _kanban_db() -> Optional[Path]:
         return p if p.exists() else None
 
 
+class KanbanBoard(Board):
+    """Watch cards through the host's own Kanban API (feature-detected). Unassigned, so no worker
+    is ever dispatched for them; made once per watch (idempotency key), commented on each breach."""
+
+    def __init__(self, kb, kbc, db_path: Path):
+        self.kb, self.kbc, self.db_path = kb, kbc, db_path
+
+    def ensure_card(self, watch: dict) -> Optional[str]:
+        with self.kbc.connect_closing(self.db_path) as conn:
+            return self.kb.create_task(
+                conn, title=f"Watch: {watch['text'][:100]}", created_by="front-desk",
+                idempotency_key=f"front-desk-watch:{watch['id']}",
+                body=("A standing watch kept by the front desk. Each regular check evaluates it; a breach is "
+                      "an escalation to the orchestrator and is noted here. Nothing is ever dispatched for "
+                      "this card. Remove the watch with /notify stop watching <n>."),
+            )
+
+    def comment(self, card_id: str, body: str) -> None:
+        with self.kbc.connect_closing(self.db_path) as conn:
+            self.kb.add_comment(conn, card_id, "front-desk", body)
+
+
+def _kanban_board(db: Optional[Path]) -> Optional[Board]:
+    if db is None:
+        return None
+    try:
+        from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
+    except Exception:
+        return None
+    if not (callable(getattr(kb, "create_task", None)) and callable(getattr(kb, "add_comment", None))
+            and callable(getattr(kbc, "connect_closing", None))):
+        return None
+    return KanbanBoard(kb, kbc, db)
+
+
 class Plugin:
     def __init__(self, ctx: Any):
         self.ctx = ctx
@@ -70,10 +106,12 @@ class Plugin:
         custom = ctx.get_config("settings_path", "") if hasattr(ctx, "get_config") else ""
         self.settings_path = Path(custom).expanduser() if custom else data / "settings.yaml"
         self._settings_cache: tuple[float, dict] = (-1.0, settings_mod.normalize({}))
+        kdb = _kanban_db()
         self.desk = Desk(
             store=Store(data / "desk.db"), settings=self.settings, deliver=self.deliver,
-            kanban_db=_kanban_db(), cron_jobs=_home() / "cron" / "jobs.json",
+            kanban_db=kdb, cron_jobs=_home() / "cron" / "jobs.json",
             state_db=_home() / "state.db", full_presence=self.viewers_fn is not None,
+            board=_kanban_board(kdb),
         )
         self._pump_lock = threading.Lock()
         self._last_pump = 0.0
@@ -283,11 +321,47 @@ class Plugin:
         if text.lower() in ("help", "?"):
             return notify_cmd.HELP
         try:
-            new, msg = notify_cmd.apply(text, current)
-        except (notify_cmd.Unparsed, settings_mod.SettingsError):
+            new, msg = self._notify_special(text, current)
+            if new is None and msg is None:
+                new, msg = notify_cmd.apply(text, current)
+        except notify_cmd.SettingsError as exc:
+            return f"I didn't change anything: {exc}"
+        except settings_mod.SettingsError as exc:
+            return f"I didn't change anything: {exc}"
+        except notify_cmd.Unparsed:
             return notify_cmd.HELP
-        settings_mod.save(self.settings_path, new)
+        if new is not None:
+            settings_mod.save(self.settings_path, new)
         return msg
+
+    def _notify_special(self, text: str, current: dict):
+        """Corrections, their yes, rule removal and 'answered'. (None, None) = not one of these."""
+        store = self.desk.store
+        if notify_cmd.YES.match(text):
+            pending = store.get("pending_rule")
+            if not pending or time.time() - float(pending.get("ts", 0)) > PENDING_RULE_S:
+                store.put("pending_rule", None)
+                return None, "There's no rule waiting for a yes, so nothing changed."
+            new, msg = notify_cmd.save_rule(pending["rule"], current)
+            store.put("pending_rule", None)
+            return new, msg
+        m = notify_cmd.FORGET.match(text)
+        if m:
+            return notify_cmd.forget_rule(int(m.group(1)), current)
+        m = notify_cmd.ANSWERED.match(text)
+        if m:
+            name = self.desk.mark_answered(m.group(1))
+            if not name:
+                return None, (f"{m.group(1)!r} isn't in your people list, so there's nothing to mark. "
+                              f"Nothing changed.")
+            return None, f"Marked {name} as answered. The reply watch starts over from their next message."
+        reason = notify_cmd.parse_correction(text)
+        if reason is not None:
+            today = time.strftime("%Y-%m-%d")
+            rule, msg = notify_cmd.propose_rule(self.desk.last_alert(), current, reason, today)
+            store.put("pending_rule", {"rule": rule, "ts": time.time()} if rule else None)
+            return None, msg
+        return None, None
 
 
 ESCALATE_SCHEMA = {
@@ -333,6 +407,8 @@ def _cli_setup(parser):
     e.add_argument("--key", default="")
     sub.add_parser("status", help="Show counts and presence.")
     sub.add_parser("settings", help="Show the settings in plain English.")
+    sub.add_parser("brief", help="Preview the morning brief now (sends nothing).")
+    sub.add_parser("check", help="Run the standing watches now (alerts follow your settings).")
 
 
 _PLUGIN: Optional[Plugin] = None
@@ -348,6 +424,10 @@ def _cli_handler(args):
                                "ref": args.ref, "key": args.key}))
     elif args.front_desk_cmd == "status":
         print(p.tool_status({}))
+    elif args.front_desk_cmd == "brief":
+        print(p.desk.build_brief(float(p.desk.store.get("last_brief") or 0)))
+    elif args.front_desk_cmd == "check":
+        print(f"{p.desk.check_now()} new escalation(s) from your standing watches.")
     else:
         print(p.cmd_notify(""))
     return 0

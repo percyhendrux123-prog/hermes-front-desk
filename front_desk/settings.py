@@ -5,6 +5,8 @@ Plain data in, plain data out. No Hermes imports, so it is testable on its own.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import os
 import re
 import tempfile
@@ -18,30 +20,40 @@ PRESENCE_STATES = ("present", "away", "unknown")
 CATEGORIES = (
     "client_escalation",
     "money",
+    "approval",
     "deploy",
     "card_needs_input",
     "card_failed",
     "card_done",
     "cron_error",
     "inbound_person",
+    "responsibility",
     "other",
 )
+
+# Locked floors: these always reach the boss, at least in the morning brief. No settings
+# file, /notify phrase or saved rule can push them below "digest".
+FLOORS = ("money", "approval")
+FLOOR_WHY = ("money and sends waiting on your approval always reach you, at least in the "
+             "morning brief. The lowest they can go is the digest")
 
 CATEGORY_LABELS = {
     "client_escalation": "client escalations",
     "money": "money",
+    "approval": "sends waiting on your approval",
     "deploy": "deploys and live changes",
     "card_needs_input": "cards waiting on a decision",
     "card_failed": "failed or stuck cards",
     "card_done": "finished cards",
     "cron_error": "scheduled job errors",
     "inbound_person": "messages from people you named",
+    "responsibility": "your standing watches",
     "other": "anything else",
 }
 
 LEVEL_LABELS = {
     "interrupt": "interrupt me now",
-    "digest": "put it in the next digest",
+    "digest": "put it in the morning brief",
     "log": "log it, don't tell me",
     "never": "ignore it completely",
 }
@@ -50,12 +62,14 @@ DEFAULTS: dict[str, Any] = {
     "levels": {
         "client_escalation": "interrupt",
         "money": "interrupt",
+        "approval": "interrupt",
         "deploy": "interrupt",
         "card_needs_input": "interrupt",
         "card_failed": "digest",
         "card_done": "digest",
         "cron_error": "digest",
         "inbound_person": "digest",
+        "responsibility": "interrupt",
         "other": "digest",
     },
     "always_interrupt": {"categories": ["money"], "people": []},
@@ -67,11 +81,17 @@ DEFAULTS: dict[str, Any] = {
     "phone": {"session_key": ""},
     "quiet_hours": {"start": "22:00", "end": "07:00"},
     "timezone": "",
-    "digest_times": ["09:00", "17:00"],
+    "brief": {"time": "07:30"},          # the morning brief; "off" turns it off
+    "check_every_hours": 3,              # standing watches are checked this often; 0 = never
+    "digest_times": [],                  # extra digest slots on top of the brief
+    "responsibilities": [],
+    "rules": [],
     "presence": {"present_idle_minutes": 10},
     "triage": {"orchestrator_first": True, "timeout_minutes": 10},
     "keywords": {
         "money": ["payment", "invoice", "refund", "chargeback", "payout", "billing", "stripe"],
+        "approval": ["waiting on approval", "awaiting approval", "needs approval", "approve the send",
+                     "ready to send", "draft for approval"],
         "deploy": ["deploy", "production", "go live", "dns", "rollback", "release"],
         "client_escalation": ["client escalation", "customer escalation", "escalat"],
     },
@@ -102,6 +122,7 @@ def normalize(raw: dict | None) -> dict:
             raise SettingsError(f"unknown category {cat!r}")
         if lvl not in LEVELS:
             raise SettingsError(f"{cat}: level must be one of {', '.join(LEVELS)}")
+        check_floor(cat, lvl)
     for urg in ("interrupt", "digest"):
         for state in PRESENCE_STATES:
             ch = s["channels"].get(urg, {}).get(state)
@@ -136,28 +157,113 @@ def normalize(raw: dict | None) -> dict:
         match = [str(m).lower() for m in (p.get("match") or [])] or [name.lower()]
         people.append({"name": name, "match": match})
     s["people"] = people
+    b = s.get("brief")
+    if b in (None, False, "off") or (isinstance(b, dict) and b.get("time") in (None, False, "off", "")):
+        s["brief"] = None
+    else:
+        if not isinstance(b, dict) or not _HHMM.match(str(b.get("time", ""))):
+            raise SettingsError("brief.time must look like 07:30 (or brief: off)")
+        s["brief"] = {"time": str(b["time"])}
+    try:
+        hours = float(s.get("check_every_hours") or 0)
+    except (TypeError, ValueError):
+        raise SettingsError("check_every_hours must be a number of hours (0 = no checks)")
+    if hours < 0 or (0 < hours < 0.25):
+        raise SettingsError("check_every_hours must be 0 (off) or at least 0.25")
+    s["check_every_hours"] = hours
+    from . import watches  # late: watches imports policy, which imports this module
+    out, seen = [], set()
+    for entry in s.get("responsibilities") or []:
+        try:
+            w = watches.parse(entry, people)
+        except watches.WatchError as exc:
+            raise SettingsError(f"responsibility not understood: {exc}") from None
+        if w["id"] not in seen:
+            seen.add(w["id"])
+            out.append(w)
+    s["responsibilities"] = out
+    rules = []
+    for r in s.get("rules") or []:
+        if not isinstance(r, dict) or r.get("category") not in CATEGORIES:
+            raise SettingsError("each rule needs a known category")
+        lvl = str(r.get("level") or "digest")
+        if lvl not in LEVELS:
+            raise SettingsError(f"rule level must be one of {', '.join(LEVELS)}")
+        check_floor(r["category"], lvl, what="a rule")
+        rules.append({"category": r["category"], "person": str(r.get("person") or ""),
+                      "watch": str(r.get("watch") or ""), "level": lvl,
+                      "reason": str(r.get("reason") or "")[:300], "added": str(r.get("added") or "")})
+    s["rules"] = rules
     return s
+
+
+def check_floor(category: str, level: str, what: str = "") -> None:
+    """Refuse, with the reason, any setting that would hide money or an approval send."""
+    if category in FLOORS and level in ("log", "never"):
+        label = CATEGORY_LABELS.get(category, category)
+        lead = f"{what.capitalize()} can't set {label}" if what else f"{label.capitalize()} can't be set"
+        raise SettingsError(f"{lead} to '{level}': {FLOOR_WHY}.")
 
 
 def load(path: Path) -> dict:
     """Read the YAML file; missing file = defaults. A broken file raises (fail loud, not silent)."""
     if not path.exists():
         return normalize({})
-    import yaml  # Hermes ships PyYAML
-
-    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    raw = parse_text(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise SettingsError("settings file must be a mapping")
     return normalize(raw)
 
 
+def _yaml():
+    try:
+        import yaml  # Hermes ships PyYAML
+        return yaml
+    except ImportError:
+        return None
+
+
+def parse_text(text: str):
+    """YAML when PyYAML is there. Without it, JSON (which is valid YAML) still loads, so the
+    desk and its tests run on a bare Python; hand-written YAML then fails loud, with why."""
+    y = _yaml()
+    if y is not None:
+        return y.safe_load(text) or {}
+    body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    if not body.strip():
+        return {}
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise SettingsError("PyYAML isn't installed here, so only JSON-style settings can be read") from None
+
+
+def dump_text(settings: dict) -> str:
+    y = _yaml()
+    if y is not None:
+        return y.safe_dump(settings, sort_keys=False, allow_unicode=True)
+    return json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+
+
+def to_file_form(s: dict) -> dict:
+    """What gets written back: watches as the user's words, not the parsed form."""
+    out = copy.deepcopy(s)
+    out["responsibilities"] = [
+        w["text"] if (w.get("level", "interrupt") == "interrupt" and not w.get("card")) else
+        {"text": w["text"], **({"level": w["level"]} if w.get("level") != "interrupt" else {}),
+         **({"card": True} if w.get("card") else {})}
+        for w in s.get("responsibilities") or []
+    ]
+    if out.get("brief") is None:
+        out["brief"] = "off"
+    return out
+
+
 def save(path: Path, settings: dict) -> None:
     """Atomic write, keeping the previous file as .bak."""
-    import yaml
-
-    normalize(settings)  # never write something load() would reject
+    normalize(to_file_form(settings))  # never write something load() would reject
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = HEADER + yaml.safe_dump(settings, sort_keys=False, allow_unicode=True)
+    text = HEADER + dump_text(to_file_form(settings))
     if path.exists():
         path.with_suffix(path.suffix + ".bak").write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".settings-")
@@ -183,7 +289,21 @@ def describe(s: dict) -> str:
         lines.append("Always interrupt, even in quiet hours: " + ", ".join(always))
     qh = s.get("quiet_hours")
     lines.append(f"Quiet hours: {qh['start']} to {qh['end']}" if qh else "Quiet hours: off")
-    lines.append("Digest times: " + (", ".join(s["digest_times"]) or "none"))
+    b = s.get("brief")
+    lines.append(f"Morning brief: {b['time']}" if b else "Morning brief: off")
+    hrs = s.get("check_every_hours") or 0
+    lines.append(f"Checks: every {hrs:g} hours, silent unless something needs you" if hrs else "Checks: off")
+    if s.get("digest_times"):
+        lines.append("Extra digest times: " + ", ".join(s["digest_times"]))
+    from . import watches
+    if s.get("responsibilities"):
+        lines.append("Standing watches:")
+        lines += [f"  - {watches.describe(w)}" for w in s["responsibilities"]]
+    if s.get("rules"):
+        lines.append("Saved rules (from your corrections):")
+        for i, r in enumerate(s["rules"], start=1):
+            lines.append("  " + describe_rule(i, r))
+    lines.append(f"Locked: {', '.join(CATEGORY_LABELS[c] for c in FLOORS)} never go below the brief.")
     phone = "set" if (s["phone"].get("session_key") or s["phone"].get("origin")) else "not set (no phone alerts)"
     lines.append(f"Phone chat: {phone}")
     ch = s["channels"]
@@ -191,3 +311,14 @@ def describe(s: dict) -> str:
         f"At the computer: urgent -> {ch['interrupt']['present']}. Away: urgent -> {ch['interrupt']['away']}."
     )
     return "\n".join(lines)
+
+
+def describe_rule(n: int, r: dict) -> str:
+    who = f" from {r['person']}" if r.get("person") else ""
+    what = CATEGORY_LABELS.get(r["category"], r["category"])
+    if r.get("watch"):
+        what = "this standing watch"
+    where = {"digest": "the morning brief", "interrupt": "an interrupt", "log": "the log only",
+             "never": "nowhere"}[r["level"]]
+    why = f' Reason: "{r["reason"]}"' if r.get("reason") else ""
+    return f"{n}. {what.capitalize()}{who} -> {where}.{why}"
