@@ -163,6 +163,8 @@ A rule moves alerts like that one (same kind, and the same person or watch if it
 
 Money and sends waiting on your approval can never be set to `log` or `never`, in the file, by `/notify`, or by a rule. The validator refuses and says why: these always reach you, at least in the morning brief. If the orchestrator handles one itself, it still appears once under "Handled for you" in the next brief (or, with the brief off, the next digest).
 
+The same floor covers channels. Every `channels.digest` state (present, away, unknown) must be `in_session` or `phone`; `none` is refused, because the digest is where a floor item ends up when nothing else can reach you. Interrupt channels may be `none`: an interrupt with no channel falls back to the digest.
+
 ## Known limits of the rhythms
 
 - **Anything that arrives between checks waits for the next one.** A watch is only evaluated at a check, so a card that crosses "2 hours" just after a check is reported at the next check, up to `check_every_hours` later. Events themselves (a card blocked, a job failing) don't wait for a check; they're picked up on the next pass.

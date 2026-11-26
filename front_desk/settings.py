@@ -128,6 +128,11 @@ def normalize(raw: dict | None) -> dict:
             ch = s["channels"].get(urg, {}).get(state)
             if ch not in CHANNELS:
                 raise SettingsError(f"channels.{urg}.{state} must be one of {', '.join(CHANNELS)}")
+            # The digest is the floor's last stop: a digest channel of "none" would leave money
+            # and approvals waiting forever (an interrupt with no channel falls back to the digest).
+            if urg == "digest" and ch == "none" and FLOORS:
+                raise SettingsError(f"channels.digest.{state} can't be 'none': {FLOOR_WHY}, so "
+                                    "the digest needs somewhere to go (in_session or phone)")
     qh = s.get("quiet_hours")
     if qh in (None, False, "off"):
         s["quiet_hours"] = None

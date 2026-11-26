@@ -627,6 +627,27 @@ class LockedFloors(unittest.TestCase):
         with self.assertRaises(settings_mod.SettingsError):
             settings_mod.load(p)
 
+    def test_channels_cannot_route_the_floor_to_nowhere(self):
+        all_none = {"channels": {u: {st: "none" for st in ("present", "away", "unknown")}
+                                 for u in ("interrupt", "digest")}}
+        with self.assertRaises(settings_mod.SettingsError) as cm:
+            settings_mod.normalize(all_none)
+        self.assertIn("always reach you", str(cm.exception))
+        for state in ("present", "away", "unknown"):
+            with self.subTest(state=state):
+                with self.assertRaises(settings_mod.SettingsError):
+                    settings_mod.normalize({"channels": {"digest": {state: "none"}}})
+        # Interrupts may still be silenced: with no channel they fall back to the digest.
+        settings_mod.normalize({"channels": {"interrupt": {st: "none" for st in ("present", "away", "unknown")}}})
+
+    def test_yaml_load_path_refuses_a_none_digest_channel(self):
+        import tempfile
+        from pathlib import Path
+        p = Path(tempfile.mkdtemp()) / "settings.yaml"
+        p.write_text(json.dumps({"channels": {"digest": {"present": "none", "away": "none", "unknown": "none"}}}))
+        with self.assertRaises(settings_mod.SettingsError):
+            settings_mod.load(p)
+
     def test_approval_keyword_refines_a_blocked_card(self):
         s = settings_mod.normalize({})
         self.assertEqual(policy.classify("card_needs_input", "Draft for approval: reply to a lead", s), "approval")
