@@ -115,6 +115,7 @@ class Plugin:
         )
         self._pump_lock = threading.Lock()
         self._last_pump = 0.0
+        self._probed = False
         self._inbound: deque = deque(maxlen=1000)  # filled by the gateway hook, drained by the pump
 
     # -- settings: reread when the file changes; a broken file keeps the last good one
@@ -194,7 +195,10 @@ class Plugin:
         if platform in ("cron", "kanban", "subagent"):
             return True
         try:
-            if getattr(self.ctx, "current_cron_execution", None):
+            # A method on the real ctx: call it. The bound method itself is always truthy, which
+            # once made every desktop turn look like a cron run (A677).
+            cron = getattr(self.ctx, "current_cron_execution", None)
+            if (cron() if callable(cron) else cron) is not None:
                 return True
         except Exception:
             pass
@@ -225,6 +229,10 @@ class Plugin:
             key, surface = self._session()
             surface = surface or str(kw.get("platform") or "")
             automated = self._automated(surface)
+            if not self._probed:  # once per process: what the desk saw on its first turn
+                self._probed = True
+                log.debug("front-desk: first turn key=%s surface=%s automated=%s viewers=%s",
+                          bool(key), surface, automated, None if automated else len(self._viewers() or []))
             self.desk.note_turn(session_key=key, surface=surface, user_message=str(kw.get("user_message") or ""),
                                 viewers=None if automated else self._viewers(), automated=automated)
             self.kick()

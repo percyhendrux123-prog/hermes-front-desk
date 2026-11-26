@@ -20,6 +20,7 @@ class FakeCtx:
         self.hooks, self.tools, self.commands, self.cli = {}, {}, {}, {}
         self.injected = []
         self._surface = surface
+        self.cron_run = None  # what current_cron_execution() returns; a run object inside a cron job
         if viewers is not None:
             self.session_viewers = lambda: viewers
 
@@ -44,6 +45,9 @@ class FakeCtx:
 
     def session_surface(self):
         return self._surface
+
+    def current_cron_execution(self):  # a method on the real PluginContext, as in Hermes v0.23.4
+        return self.cron_run
 
 
 def load_plugin(ctx, *, with_viewers_module=False, session_key="agent:main:local:desk"):
@@ -117,6 +121,23 @@ class Wiring(unittest.TestCase):
         self.assertTrue(dup["duplicate"])
         res = ctx.hooks["pre_llm_call"](user_message="next", platform="desktop")
         self.assertIn(f"#{out['id']}", res["context"])
+
+    def test_a_desktop_turn_records_the_live_session_and_viewers(self):
+        # A677: the real ctx has current_cron_execution() as a method; its bound method is always
+        # truthy, so reading it without calling it made every desktop turn look like a cron run.
+        ctx = FakeCtx(viewers=[{"idle_seconds": 1}])
+        _, p, _, _ = load_plugin(ctx)
+        ctx.hooks["pre_llm_call"](user_message="hi", platform="desktop")
+        self.assertEqual(p.desk.live_session()["session_key"], "agent:main:local:desk")
+        self.assertEqual(p.desk.store.get("viewers")["viewers"], [{"idle_seconds": 1}])
+        self.assertEqual(json.loads(ctx.tools["front_desk_status"]({}))["presence_mode"], "full")
+
+    def test_a_cron_run_is_automated(self):
+        ctx = FakeCtx(viewers=[{"idle_seconds": 1}])
+        ctx.cron_run = object()
+        _, p, _, _ = load_plugin(ctx)
+        ctx.hooks["pre_llm_call"](user_message="job", platform="desktop")
+        self.assertIsNone(p.desk.live_session())
 
     def test_workers_get_no_context_and_cannot_triage(self):
         ctx = FakeCtx()
