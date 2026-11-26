@@ -201,7 +201,7 @@ For scripts: `hermes front-desk escalate --category cron_error --title "Backup f
 
 ## Disclosures
 
-What it reads, writes and runs, checked against the code:
+What it reads, writes and runs, checked against the code. The same facts in one sentence, as used in the plugin catalog entry, are in `CATALOG-DISCLOSURE.txt`.
 
 - **Writes** inside its data dir `<hermes home>/plugin-data/front-desk/`: `desk.db` (SQLite: escalation titles, short details, decisions, timestamps, daily alert counts, a pending rule offer) and `settings.yaml` (+ `settings.yaml.bak`). `settings_path` can point the settings elsewhere.
 - **Writes to the Kanban board** only for a watch you marked `card: true`: one unassigned card per watch and a comment per breach, through the host's own `kanban_db.create_task` / `add_comment` (never raw SQL). Nothing else on the board is ever changed.
@@ -210,7 +210,7 @@ What it reads, writes and runs, checked against the code:
 - **Sends:** only through `ctx.inject_message`, and only to the orchestrator's live session or the phone chat you configured. It never auto-picks a chat.
 - **Background work:** a short-lived thread runs one poll-and-deliver pass. It starts from a Kanban dispatcher tick, a turn or an inbound gateway message, at most every 20 seconds. A board event (`kanban_task_blocked` / `kanban_task_completed`) or a `front_desk_escalate` call starts one right away. There is never more than one pass at a time, no long-running thread, and no timer of its own. The gateway hook only puts the sender on an in-memory queue. That pass does the matching and storing, so the hook never touches disk.
 - **None of:** network calls, shell commands, subprocesses, Hermes child sessions, credentials, telemetry, approvals, or edits to Hermes config.
-- **Private imports**, each wrapped so it fails open: `hermes_cli.plugin_session.session_key()` (the routing key for the live session; v0.23.3 has no public form of it), `hermes_cli.kanban_db.kanban_db_path()` (where the board is; falls back to `<hermes home>/kanban.db`), `hermes_cli.kanban_db.create_task` / `add_comment` with `hermes_cli.kanban_db_connect.connect_closing` (watch cards only; no public plugin API for Kanban writes exists yet, and without them watch cards are simply off), `hermes_constants.get_hermes_home()` (falls back to `$HERMES_HOME` or `~/.hermes`) and `plugins.plugin_storage.plugin_data_dir()` (falls back to `<hermes home>/plugin-data/front-desk`).
+- **Private imports**, each wrapped so it fails open: `hermes_cli.plugin_session.session_key()` (the routing key for the live session; v0.23.3 has no public form of it), `hermes_cli.kanban_db.kanban_db_path()` (where the board is; falls back to `<hermes home>/kanban.db`), `hermes_cli.kanban_db.create_task` / `add_comment` with `hermes_cli.kanban_db_connect.connect_closing` (watch cards only; no public plugin API for Kanban writes exists yet, and without them watch cards are simply off), `hermes_constants.get_hermes_home()` (falls back to `$HERMES_HOME` or `~/.hermes`) and `plugins.plugin_storage.plugin_data_dir()` (falls back to `<hermes home>/plugin-data/front-desk`; the public `ctx.state.data_dir` points at a differently named `plugin-data/agent-plugin-…` directory, so switching to it would orphan existing settings and history).
 
 ## Not covered
 
@@ -222,10 +222,10 @@ What it reads, writes and runs, checked against the code:
 ## Tests
 
 ```bash
-uv run --no-project --python 3.12 --with pyyaml python -m unittest discover -s tests
+uv run --no-project --python 3.12 --with pyyaml --with ruamel.yaml==0.18.16 python -m unittest discover -s tests
 ```
 
-On a bare Python with no PyYAML (`python3 -m unittest discover -s tests`), everything runs except the one test that reads `plugin.yaml`, which skips with the command above. Without PyYAML the desk reads and writes its settings as JSON, which is valid YAML. Hand-written YAML then fails loud with that reason. Hermes ships PyYAML, so installed copies never hit this. The suite starts no subprocesses, so no test can crash a real Python process.
+The settings file is read with PyYAML when it's installed, otherwise with ruamel.yaml, which Hermes itself depends on (a v0.23.3 install has ruamel.yaml and no PyYAML), using YAML 1.1 rules so `brief: off` still means off. On a bare Python with neither (`python3 -m unittest discover -s tests`), the tests that need a parser skip with the command above and the rest run. There the desk reads and writes its settings as JSON, which is valid YAML, and hand-written YAML fails loud with that reason. The suite starts no subprocesses, so no test can crash a real Python process.
 
 The suite covers routing to the live session, every settings level, quiet hours (including wrap past midnight), overrides, presence present/away/unknown in both modes, the v0.23.3 degraded path, feature detection, board and cron intake, dedupe (one escalation never alerts twice), delivery retries, the `/notify` phrases, the morning brief (time, once a day, contents, phone when away, off), the regular check (silent when nothing is breached, its interval, dedupe per breach), standing watches (parsing, refusals, filters, people, answered, watch cards), corrections (phrases, offer, yes, undo, expiry, always-interrupt conflicts), locked floors on every path, the alert counter, and the plugin wiring against stubbed hosts.
 

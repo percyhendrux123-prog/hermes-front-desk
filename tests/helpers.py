@@ -21,7 +21,7 @@ try:
     HAVE_YAML = True
 except ImportError:  # bare Python: YAML-only tests skip with this message, the rest run
     HAVE_YAML = False
-NO_YAML = "PyYAML not installed; run: uv run --no-project --python 3.12 --with pyyaml python -m unittest discover -s tests"
+NO_YAML = "PyYAML not installed; run: uv run --no-project --python 3.12 --with pyyaml --with ruamel.yaml==0.18.16 python -m unittest discover -s tests"
 from front_desk.desk import Desk  # noqa: E402
 from front_desk.policy import Event  # noqa: E402
 from front_desk.store import Store  # noqa: E402

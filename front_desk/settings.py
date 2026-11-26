@@ -223,17 +223,57 @@ def load(path: Path) -> dict:
     return normalize(raw)
 
 
+class _RuamelSafe:
+    """PyYAML's safe_load/safe_dump on ruamel.yaml, with YAML 1.1 rules so `brief: off` still
+    reads as off. Hermes itself depends on ruamel.yaml (not PyYAML), so this is the parser an
+    installed copy actually has. A fresh parser per call: ruamel instances aren't thread-safe."""
+
+    def __init__(self, ruamel_yaml):
+        self._mod = ruamel_yaml
+
+    def safe_load(self, text: str):
+        y = self._mod.YAML(typ="safe", pure=True)
+        y.version = (1, 1)
+        return y.load(text)
+
+    def safe_dump(self, data, sort_keys: bool = False, allow_unicode: bool = True) -> str:
+        import io
+        from ruamel.yaml.resolver import VersionedResolver
+
+        class _Yaml11(VersionedResolver):  # quote "off"/"yes" without a %YAML directive
+            @property
+            def processing_version(self):
+                return (1, 1)
+
+        y = self._mod.YAML(typ="safe", pure=True)
+        y.Resolver = _Yaml11
+        y.default_flow_style = False
+        y.allow_unicode = allow_unicode
+        y.sort_base_mapping_type_on_output = sort_keys
+        y.indent(mapping=2, sequence=4, offset=2)
+        out = io.StringIO()
+        y.dump(data, out)
+        return out.getvalue()
+
+
 def _yaml():
+    """PyYAML if it's there, else ruamel.yaml (what Hermes ships), else None (JSON only)."""
     try:
-        import yaml  # Hermes ships PyYAML
+        import yaml
         return yaml
+    except ImportError:
+        pass
+    try:
+        import ruamel.yaml
+        return _RuamelSafe(ruamel.yaml)
     except ImportError:
         return None
 
 
 def parse_text(text: str):
-    """YAML when PyYAML is there. Without it, JSON (which is valid YAML) still loads, so the
-    desk and its tests run on a bare Python; hand-written YAML then fails loud, with why."""
+    """YAML when a YAML parser is there (PyYAML or Hermes's ruamel.yaml). Without either, JSON
+    (which is valid YAML) still loads, so the desk and its tests run on a bare Python;
+    hand-written YAML then fails loud, with why."""
     y = _yaml()
     if y is not None:
         return y.safe_load(text) or {}
@@ -243,7 +283,8 @@ def parse_text(text: str):
     try:
         return json.loads(body)
     except ValueError:
-        raise SettingsError("PyYAML isn't installed here, so only JSON-style settings can be read") from None
+        raise SettingsError("no YAML parser (PyYAML or ruamel.yaml) is installed here, "
+                            "so only JSON-style settings can be read") from None
 
 
 def dump_text(settings: dict) -> str:
