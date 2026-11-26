@@ -63,6 +63,11 @@ class RuamelWhenNoPyYAML(unittest.TestCase):
         with NoPyYAML():
             self.assertIsInstance(settings_mod._yaml(), settings_mod._RuamelSafe)
 
+    def test_ruamel_reads_yaml_1_1_booleans_like_pyyaml(self):
+        with NoPyYAML():
+            y = settings_mod._yaml()
+        self.assertEqual(y.safe_load("x: off\nw: yes\nz: 07:30\n"), {"x": False, "w": True, "z": "07:30"})
+
     def test_hand_written_yaml_loads_without_pyyaml(self):
         p = _tmpdir() / "settings.yaml"
         p.write_text(HAND_WRITTEN, encoding="utf-8")

@@ -226,7 +226,8 @@ def load(path: Path) -> dict:
 class _RuamelSafe:
     """PyYAML's safe_load/safe_dump on ruamel.yaml, with YAML 1.1 rules so `brief: off` still
     reads as off. Hermes itself depends on ruamel.yaml (not PyYAML), so this is the parser an
-    installed copy actually has. A fresh parser per call: ruamel instances aren't thread-safe."""
+    installed copy actually has. A fresh parser per call: ruamel instances aren't thread-safe.
+    Known difference from PyYAML: bare y/n load as booleans here; save() quotes them."""
 
     def __init__(self, ruamel_yaml):
         self._mod = ruamel_yaml
