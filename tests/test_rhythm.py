@@ -333,7 +333,7 @@ class Responsibilities(RhythmCase):
         self.assertTrue(again["responsibilities"][1]["card"])
 
     def test_card_code(self):
-        self.assertEqual(watches.card_code("t_1", "A667 · Front desk"), "A667")
+        self.assertEqual(watches.card_code("t_1", "A101 · Front desk"), "A101")
         self.assertEqual(watches.card_code("t_1", "plain title"), "t_1")
 
 
