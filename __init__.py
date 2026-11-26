@@ -425,7 +425,7 @@ def _cli_handler(args):
     elif args.front_desk_cmd == "status":
         print(p.tool_status({}))
     elif args.front_desk_cmd == "brief":
-        print(p.desk.build_brief(float(p.desk.store.get("last_brief") or 0)))
+        print(p.desk.build_brief())
     elif args.front_desk_cmd == "check":
         print(f"{p.desk.check_now()} new escalation(s) from your standing watches.")
     else:

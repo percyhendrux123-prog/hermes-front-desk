@@ -164,6 +164,9 @@ def normalize(raw: dict | None) -> dict:
         if not isinstance(b, dict) or not _HHMM.match(str(b.get("time", ""))):
             raise SettingsError("brief.time must look like 07:30 (or brief: off)")
         s["brief"] = {"time": str(b["time"])}
+    if s["brief"] is None and not s["digest_times"]:
+        raise SettingsError("with the morning brief off, set at least one digest time (digest_times), "
+                            "otherwise digest items, including money and approvals, would never reach you")
     try:
         hours = float(s.get("check_every_hours") or 0)
     except (TypeError, ValueError):

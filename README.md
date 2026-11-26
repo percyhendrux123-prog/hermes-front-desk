@@ -121,12 +121,12 @@ Only a desktop, TUI or CLI session can be the live session. A gateway chat never
 
 **The morning brief** comes once a day at `brief.time` (7:30 AM local by default), in the chat you're in if you're at the computer, otherwise your phone chat. It has:
 
-- **Waiting on you:** every Kanban card blocked on a person right now, by its card code (a leading tag like `A101`, otherwise the card id), with how long it has waited. Cards waiting on another card, or on a flaky retry, aren't listed, because they aren't waiting on you.
+- **Waiting on you:** every Kanban card blocked on a person right now (the first 15 listed, the rest counted), by its card code (a leading tag like `A101`, otherwise the card id), with how long it has waited. Cards waiting on another card, or on a flaky retry, aren't listed, because they aren't waiting on you.
 - **For you:** everything set to `digest`, everything held overnight by quiet hours, and anything the orchestrator passed on without urgency.
-- **Handled for you:** money and approval items the orchestrator dealt with itself since the last brief. These are always shown (see locked floors).
+- **Handled for you:** money and approval items the orchestrator dealt with itself that no brief has shown yet. Each is shown once (see locked floors).
 - **Alerts:** how many times you were interrupted yesterday and so far today. This is the approval-fatigue counter: if the number is high, tell the desk what could have waited.
 
-Installing the desk never replays a brief it missed. The first brief is the next morning's.
+Installing the desk never replays a brief it missed: installed after today's brief time, the first brief is tomorrow's; installed before it, today's. A morning with nothing at all to say (nothing waiting, nothing held, nothing handled, no alerts yesterday) gets no brief. Turning the brief off needs at least one `digest_times` slot, so digest items always have somewhere to go.
 
 **The regular check** runs every `check_every_hours` (3 by default). It evaluates your standing watches. A check never sends anything by itself. A breached watch becomes an escalation like any other: it reaches the orchestrator first, then follows your settings. When nothing is breached, you hear nothing.
 
@@ -141,7 +141,7 @@ Some duties aren't events. "Nobody waits more than two days for a reply" only ma
 | `nobody waits more than two days for a reply` | anyone on your `people` list whose message has gone unanswered that long |
 | `Dana Reyes not answered in 1 day` | one person from your `people` list |
 
-Durations can be numbers or words ("two days", "90 minutes", "a week"). A watch it can't read is refused with the reason, and your settings stay as they were. Each breach alerts once. A card blocked again later, or a new message after you answered, is a new breach.
+Durations can be numbers or words ("two days", "90 minutes", "2h", "a week"), one per watch ("150 minutes", not "2 hours and 30 minutes"). A watch it can't read is refused with the reason, and your settings stay as they were. Each breach alerts once. A card blocked again later is a new breach. For a reply watch, each wait is reported once; the next unanswered message from that person starts a new wait.
 
 "Answered" means the desk saw it: the orchestrator marked that message `handled`, or you said `/notify answered Dana Reyes`. Front Desk keeps no message text, so it can't see replies sent from your phone's own apps.
 
@@ -155,7 +155,7 @@ When an alert could have waited, say so in plain words, with why:
 /notify that could have waited, vendor updates only matter when a date or price changes
 ```
 
-The desk finds the last alert that interrupted you and offers a rule: "deploys and live changes -> the morning brief", with your reason. Nothing is saved until you reply `/notify yes` (the offer lasts an hour). Then it echoes the saved rule with its undo line, `/notify forget rule 1`. The phrases are fixed ("that could have waited", "this should have been in the brief", "that wasn't urgent"). The desk doesn't guess what you meant.
+The desk finds the last alert that interrupted you (within the last day) and offers a rule: "deploys and live changes -> the morning brief", with your reason. Nothing is saved until you reply `/notify yes` (the offer lasts an hour). Then it echoes the saved rule with its undo line, `/notify forget rule 1`. The phrases are fixed ("that could have waited", "this should have been in the brief", "that wasn't urgent"). The desk doesn't guess what you meant.
 
 A rule moves alerts like that one (same kind, and the same person or watch if it had one) to the morning brief. The reason is kept with the rule and attached to every alert the rule moves, so the orchestrator sees it when it triages. A rule can't hold back something set to always interrupt. To change that, use `/notify stop always interrupting for ...`.
 

@@ -22,12 +22,17 @@ NUM_WORDS = {
 UNIT_S = {"minute": 60, "min": 60, "hour": 3600, "hr": 3600, "h": 3600, "day": 86400, "d": 86400,
           "week": 604800}
 _NUM = r"(\d+(?:\.\d+)?|a couple of|a few|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
-_DUR = re.compile(r"\b" + _NUM + r"\s*(minutes?|mins?|hours?|hrs?|h|days?|d|weeks?)\b")
+_UNIT = r"(minutes?|mins?|hours?|hrs?|h|days?|d|weeks?)\b"
+# A digit may touch its unit ("2h"); a word needs a space ("two days"), so "and", "tend" or "read"
+# can never read as a duration.
+_DUR = re.compile(r"\b(?:(\d+(?:\.\d+)?)\s*|(a couple of|a few|an?|one|two|three|four|five|six|seven|eight|nine|"
+                  r"ten|eleven|twelve)\s+)" + _UNIT)
 _CARD = re.compile(r"\bcards?\b")
 _CARD_WAIT = re.compile(r"waiting on me|waiting for me|waiting on my|blocked|stuck|waits? on me")
 _REPLY = re.compile(r"\brepl(?:y|ies|ied)\b|\banswer(?:ed|s)?\b|\brespon(?:se|ded|d)\b|\bheard? back\b")
 _ANYONE = re.compile(r"\b(nobody|no one|noone|anyone|everyone|anybody|any person|people)\b")
-_STOP = {"a", "an", "any", "my", "the", "every", "no", "one", "each", "if", "when"}
+_STOP = {"a", "an", "any", "my", "the", "every", "no", "one", "each", "if", "when", "blocked", "stuck", "waiting",
+         "urgent", "open", "late", "old", "new", "important", "kanban", "board", "single", "some", "that", "this"}
 LEVELS = ("interrupt", "digest")
 
 EXAMPLES = ('"card waiting on me over 2 hours", "tell me if a client card is blocked over 90 minutes", '
@@ -43,11 +48,14 @@ def watch_id(text: str) -> str:
 
 
 def _duration(low: str) -> int:
-    m = _DUR.search(low)
-    if not m:
+    found = list(_DUR.finditer(low))
+    if not found:
         raise WatchError("say how long, for example 'over 2 hours' or 'more than two days'")
-    n, unit = m.group(1), m.group(2)
-    num = float(NUM_WORDS[n]) if n in NUM_WORDS else float(n)
+    if len(found) > 1:
+        raise WatchError("give one length of time, for example 'over 150 minutes' instead of '2 hours and 30 minutes'")
+    m = found[0]
+    digits, word, unit = m.group(1), m.group(2), m.group(3)
+    num = float(digits) if digits else float(NUM_WORDS[word])
     key = unit.rstrip("s") if unit not in ("h", "d") else unit
     secs = int(num * UNIT_S[key])
     if secs < 60:
@@ -83,7 +91,8 @@ def parse(entry, people: Iterable[dict]) -> dict:
             out.update(kind="reply_wait", seconds=secs, person="")
             return out
         for p in people:
-            if p["name"].lower() in low or any(m and m in low for m in p.get("match", [])):
+            names = [p["name"].lower(), *(m for m in p.get("match", []) if m)]
+            if any(re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", low) for n in names):
                 out.update(kind="reply_wait", seconds=secs, person=p["name"])
                 return out
         raise WatchError(f"{text!r}: name someone from your people list, or say 'nobody'")
@@ -118,7 +127,8 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
 
     ``blocked_cards``: [{task_id, code, title, since, block_event_id}] waiting on the boss.
     ``inbound``: [{id, person, created_at, status}] messages from named people, oldest first.
-    ``answered``: {person name (lower): ts} the boss marked as answered.
+    ``answered``: {person name (lower): ts}; messages at or before ts don't count (answered by the
+    boss, or already reported by this watch, so the next unanswered message starts a new wait).
     """
     out: list[Event] = []
     if w["kind"] == "card_waiting":
@@ -139,7 +149,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
             name = str(r.get("person") or "")
             if not name or (w["person"] and name.lower() != w["person"].lower()):
                 continue
-            if r.get("status") == "handled" or float(answered.get(name.lower(), 0)) > float(r["created_at"]):
+            if r.get("status") == "handled" or float(answered.get(name.lower(), 0)) >= float(r["created_at"]):
                 continue
             oldest.setdefault(name.lower(), r)
         for low_name, r in oldest.items():
@@ -150,6 +160,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
                 key=f"watch:{w['id']}:reply:{low_name}:{r['id']}", category="responsibility",
                 title=f"{r['person']} has waited {ago(age)} for a reply", detail=f"Your watch: {w['text']}",
                 source="watch", ref=str(r.get("ref") or ""), person=str(r["person"]), level=w["level"],
+                since=float(r["created_at"]),
             ))
     return out
 

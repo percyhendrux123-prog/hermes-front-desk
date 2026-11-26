@@ -22,6 +22,7 @@ SHOW_AGAIN_S = 600
 MAX_ATTEMPTS = 3
 LOST_CLAIM_S = 600
 BRIEF_MAX = 25     # digest items per brief; the rest wait for the next one, never dropped
+WAITING_MAX = 15   # cards listed under "Waiting on you"; the rest are counted
 
 Deliver = Callable[[str, dict], bool]  # (text, {"session_key"} | {"origin"}) -> accepted
 
@@ -242,8 +243,15 @@ class Desk:
         new = 0
         for w in s["responsibilities"]:
             card = self._watch_card(w) if w.get("card") else None
-            for ev in watches.evaluate(w, now, blocked_cards=blocked, inbound=inbound, answered=answered):
+            # A reply watch reports each wait once; the next unanswered message starts a new wait.
+            marks_key = f"reply_marks:{w['id']}"
+            marks = self.store.get(marks_key) or {}
+            seen = {k: max(float(answered.get(k, 0)), float(marks.get(k, 0))) for k in {*answered, *marks}}
+            for ev in watches.evaluate(w, now, blocked_cards=blocked, inbound=inbound, answered=seen):
                 eid = self.ingest(ev)
+                if ev.since and ev.person:
+                    marks[ev.person.lower()] = max(float(marks.get(ev.person.lower(), 0)), ev.since)
+                    self.store.put(marks_key, marks)
                 if eid is None:
                     continue  # this breach already alerted
                 new += 1
@@ -291,39 +299,60 @@ class Desk:
         day = (self._now_dt(self.clock()).date() - timedelta(days=days_back)).isoformat()
         return int(self.store.get(f"alerts:{day}", 0))
 
-    def last_alert(self) -> Optional[Any]:
+    def last_alert(self, max_age_s: float = 86400) -> Optional[Any]:
+        """The newest alert that interrupted the boss, if it is under a day old."""
         eid = self.store.get("last_alert")
-        return self.store.row(int(eid)) if eid is not None else None
+        row = self.store.row(int(eid)) if eid is not None else None
+        if row is None or row["notified_at"] is None or self.clock() - float(row["notified_at"]) > max_age_s:
+            return None
+        return row
 
-    def build_brief(self, since: float, rows: Optional[list] = None) -> str:
-        """The brief's text. ``rows`` = the digest items it carries (default: all waiting, for a
-        preview). Read-only: claiming happens in send_brief_if_due."""
+    def build_brief(self, rows: Optional[list] = None, handled: Optional[list] = None) -> str:
+        """The brief's text. ``rows`` = digest items it carries, ``handled`` = money/approval items
+        the orchestrator handled (defaults: everything waiting, for a preview). Read-only."""
         now = self.clock()
         when = self._now_dt(now).strftime("%a %b %d").replace(" 0", " ")
         lines = [f"{MARKER} Morning brief, {when}."]
-        blocked = sources.blocked_on_boss(self.kanban_db) if self.kanban_db is not None else []
+        blocked = self.blocked_on_boss()
         if blocked:
             lines.append(f"Waiting on you ({len(blocked)}):")
-            for c in blocked[:15]:
+            for c in blocked[:WAITING_MAX]:
                 name = c["title"] if c["title"].startswith(c["code"]) else f"{c['code']} · {c['title']}"
                 lines.append(f"- {name[:100]} (blocked {watches.ago(now - c['since'])})")
+            if len(blocked) > WAITING_MAX:
+                lines.append(f"- and {len(blocked) - WAITING_MAX} more on the board")
         elif self.kanban_db is not None:
             lines.append("No cards are waiting on you.")
-        rows = self.store.rows("status='digest'") if rows is None else rows
-        if rows:
-            lines.append(f"For you ({len(rows)}):")
-            lines += [_line(r) for r in rows[:BRIEF_MAX]]
-            if len(rows) > BRIEF_MAX:
-                lines.append(f"- and {len(rows) - BRIEF_MAX} more, in the next digest")
-        marks = ",".join("?" for _ in FLOORS)
-        handled = self.store.rows(f"status='handled' AND category IN ({marks}) AND created_at>=?", (*FLOORS, since))
+        rows = self.store.rows("status='digest'")[:BRIEF_MAX] if rows is None else rows
+        waiting_ids = {c["task_id"] for c in blocked}
+        shown = [r for r in rows if not (r["source"] == "kanban" and r["category"] == "card_needs_input"
+                                         and r["ref"] in waiting_ids)]  # already listed above
+        if shown:
+            lines.append(f"For you ({len(shown)}):")
+            lines += [_line(r) for r in shown]
+        ids = {r["id"] for r in rows}
+        left = len([r for r in self.store.rows("status='digest'") if r["id"] not in ids])
+        if left > 0:
+            lines.append(f"- and {left} more, in the next brief")
+        handled = self.handled_floor()[:BRIEF_MAX] if handled is None else handled
         if handled:
             lines.append("Handled for you (money and approvals are always shown):")
-            lines += [_line(r) for r in handled[:15]]
+            lines += [_line(r) for r in handled]
+        more = len(self.handled_floor()) - len(handled)
+        if more > 0:
+            lines.append(f"- and {more} more handled, in the next brief")
         y, t = self.alert_count(1), self.alert_count(0)
         lines.append(f"Alerts: {y} interruption(s) yesterday, {t} so far today. If one could have waited, "
                      f"say so: /notify that could have waited, <why>")
         return "\n".join(lines)
+
+    def blocked_on_boss(self) -> list:
+        return sources.blocked_on_boss(self.kanban_db) if self.kanban_db is not None else []
+
+    def handled_floor(self) -> list:
+        """Money and approval items the orchestrator handled that no brief has shown yet."""
+        marks = ",".join("?" for _ in FLOORS)
+        return self.store.rows(f"status='handled' AND category IN ({marks}) AND briefed_at IS NULL", FLOORS)
 
     def send_brief_if_due(self) -> int:
         """Once a day at ``brief.time``: what's blocked on the boss, the digest items, and the
@@ -344,9 +373,15 @@ class Desk:
         target = self._target(channel, self.live_session())
         if target is None:
             return 0  # no channel yet; the brief goes out at the next pass that has one
+        handled = self.handled_floor()[:BRIEF_MAX]
+        if not (self.store.rows("status='digest'") or handled or self.blocked_on_boss() or self.alert_count(1)):
+            self.store.put("last_brief", now)  # nothing at all to say: no brief today
+            return 0
         mine = [r for r in self.store.rows("status='digest'")[:BRIEF_MAX]
                 if self.store.transition(r["id"], ("digest",), status="sending", channel=channel, notified_at=now)]
-        ok = self._send(self.build_brief(float(last), mine), target)
+        ok = self._send(self.build_brief(mine, handled), target)
+        if ok:
+            self.store.touch([r["id"] for r in handled], "briefed_at", now)
         for r in mine:
             self.store.transition(r["id"], ("sending",), **({"status": "delivered"} if ok else
                                                            {"status": "digest", "notified_at": None, "channel": ""}))

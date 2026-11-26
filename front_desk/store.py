@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS events (
     shown_at      REAL,
     notified_at   REAL,
     channel       TEXT NOT NULL DEFAULT '',
-    attempts      INTEGER NOT NULL DEFAULT 0
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    briefed_at    REAL                -- a handled money/approval item shown in a morning brief
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 """
@@ -41,6 +42,9 @@ class Store:
         self._lock = threading.Lock()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
+            if "briefed_at" not in cols:  # a desk.db made by 0.1.0
+                c.execute("ALTER TABLE events ADD COLUMN briefed_at REAL")
 
     @contextmanager
     def _conn(self):
@@ -101,7 +105,7 @@ class Store:
             return cur.rowcount == 1
 
     def touch(self, ids: list[int], column: str, now: float) -> None:
-        assert column in ("shown_at",)
+        assert column in ("shown_at", "briefed_at")
         if not ids:
             return
         with self._lock, self._conn() as c:

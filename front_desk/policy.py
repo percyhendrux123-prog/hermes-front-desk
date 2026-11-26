@@ -26,6 +26,7 @@ class Event:
     ref: str = ""           # card id, job id, ...
     person: str = ""        # a named person this is from/about, if matched
     level: str = ""         # a watch's own level; empty = the category's level
+    since: float = 0.0      # a reply watch: when the message it reports arrived
 
 
 def match_person(text: str, settings: dict) -> str:

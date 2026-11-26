@@ -178,6 +178,7 @@ class Wiring(unittest.TestCase):
     def test_correction_with_a_reason_is_offered_then_saved_on_yes(self):
         ctx = FakeCtx(viewers=[{"idle_seconds": 2}])
         _, p, _, _ = load_plugin(ctx)
+        p.kick = lambda force=False: None  # no background pass racing the assertions
         notify = ctx.commands["notify"]
         self.assertIn("no rule waiting", notify("yes"))
         self.assertIn("don't have a recent alert", notify("that could have waited, x"))
@@ -198,6 +199,7 @@ class Wiring(unittest.TestCase):
     def test_offer_expires(self):
         ctx = FakeCtx(viewers=[{"idle_seconds": 2}])
         mod, p, _, _ = load_plugin(ctx)
+        p.kick = lambda force=False: None
         ctx.hooks["pre_llm_call"](user_message="hi", platform="desktop")
         eid = json.loads(ctx.tools["front_desk_escalate"]({"category": "deploy", "title": "Release R3"}))["id"]
         ctx.tools["front_desk_triage"]({"event_id": eid, "decision": "tell_boss"})

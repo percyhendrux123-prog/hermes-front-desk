@@ -92,6 +92,7 @@ class MorningBrief(RhythmCase):
         self.settings(digest_times=[])
         self.start()
         self.at_desk()
+        self.desk.ingest(Event(key="d1", category="card_done", title="A107 · Done"))
         self.clock.t = at(7, 29)
         self.assertEqual(self.desk.pump()["brief"], 0)
         self.clock.t = at(7, 30)
@@ -101,6 +102,7 @@ class MorningBrief(RhythmCase):
         self.assertEqual(self.desk.pump()["brief"], 0)
         self.clock.t = at(7, 45, day=5)
         self.at_desk()
+        self.desk.ingest(Event(key="d2", category="card_done", title="A108 · Done"))
         self.assertEqual(self.desk.pump()["brief"], 1)
         self.assertEqual(sum("Morning brief" in t for t, _ in self.sent.sent), 2)
 
@@ -130,17 +132,103 @@ class MorningBrief(RhythmCase):
     def test_brief_goes_to_the_phone_when_away(self):
         self.settings(digest_times=[])
         self.start()
+        self.desk.ingest(Event(key="d1", category="card_done", title="A109 · Done"))
         self.make_state_db(self.clock() - 5 * HOUR)
         self.clock.t = at(7, 31)
         self.desk.pump()
         self.assertIn("Morning brief", self.sent.to(PHONE_KEY)[-1])
 
     def test_brief_off(self):
-        self.settings(brief="off", digest_times=[])
+        self.settings(brief="off", digest_times=["17:00"])
         self.start()
         self.at_desk()
         self.clock.t = at(7, 31)
         self.assertEqual(self.desk.pump()["brief"], 0)
+
+    def test_brief_off_needs_a_digest_slot_so_nothing_is_stranded(self):
+        with self.assertRaises(settings_mod.SettingsError) as cm:
+            settings_mod.normalize({"brief": "off", "digest_times": []})
+        self.assertIn("never reach you", str(cm.exception))
+        with self.assertRaises(notify_cmd.SettingsError):
+            notify_cmd.apply("brief off", settings_mod.normalize({}))
+
+    def test_installed_before_brief_time_gets_todays_brief(self):
+        self.settings(digest_times=[])
+        self.start(hh=6)
+        self.at_desk()
+        self.desk.ingest(Event(key="d1", category="card_done", title="A105 · Done"))
+        self.clock.t = at(7, 31)
+        self.at_desk()
+        self.assertEqual(self.desk.pump()["brief"], 1)
+
+    def test_a_morning_with_nothing_to_say_sends_no_brief(self):
+        self.settings(digest_times=[])
+        self.start()
+        self.at_desk()
+        self.clock.t = at(7, 31)
+        self.at_desk()
+        self.assertEqual(self.desk.pump()["brief"], 0)
+        self.assertEqual(self.sent.sent, [])
+        self.clock.t = at(7, 31, day=5)  # and it doesn't pile up for the next day
+        self.at_desk()
+        self.assertEqual(self.desk.pump()["brief"], 0)
+
+    def test_handled_money_before_a_brief_still_shows_once_in_the_next(self):
+        self.settings(digest_times=[], always_interrupt={"categories": [], "people": []},
+                      triage={"orchestrator_first": True, "timeout_minutes": 120})
+        self.start(day=5, hh=6)
+        self.at_desk()
+        self.desk.ingest(Event(key="x", category="card_done", title="A106 · Filler"))
+        self.clock.t = at(7, 0, day=5)
+        eid = self.desk.ingest(Event(key="m7", category="money", title="Refund R-21 issued"))
+        self.clock.t = at(7, 31, day=5)
+        self.at_desk()
+        self.desk.pump()  # today's brief went out before the refund was handled
+        self.clock.t = at(8, 0, day=5)
+        self.desk.triage(eid, "handled", "approved earlier")
+        self.clock.t = at(7, 31, day=6)
+        self.at_desk()
+        self.desk.store.put(f"alerts:{self.desk._now_dt(at(12, 0, day=5)).date().isoformat()}", 1)
+        self.desk.pump()
+        self.assertIn("Refund R-21", self.sent.to(DESK_KEY)[-1])
+        self.clock.t = at(7, 31, day=7)
+        self.at_desk()
+        self.desk.store.put(f"alerts:{self.desk._now_dt(at(12, 0, day=6)).date().isoformat()}", 1)
+        self.desk.pump()
+        self.assertNotIn("Refund R-21", self.sent.to(DESK_KEY)[-1])  # shown once
+
+    def test_overflow_is_counted_never_silently_dropped(self):
+        from front_desk import desk as desk_mod
+        self.settings(digest_times=[], always_interrupt={"categories": [], "people": []})
+        self.start()
+        self.at_desk()
+        for i in range(desk_mod.BRIEF_MAX + 2):
+            self.desk.ingest(Event(key=f"d{i}", category="card_done", title=f"Done {i}"))
+        for i in range(desk_mod.BRIEF_MAX + 1):
+            e = self.desk.ingest(Event(key=f"m{i}", category="money", title=f"Refund {i}"))
+            self.desk.triage(e, "handled")
+        for i in range(desk_mod.WAITING_MAX + 1):
+            self.block(f"t_w{i}", f"A{200 + i} · Pick {i}", hours_ago=1)
+        self.clock.t = at(7, 31)
+        self.at_desk()
+        self.desk.pump()
+        brief = self.sent.to(DESK_KEY)[-1]
+        self.assertIn("and 2 more, in the next brief", brief)
+        self.assertIn("and 1 more handled, in the next brief", brief)
+        self.assertIn("and 1 more on the board", brief)
+        self.assertEqual(len(self.desk.store.rows("status='digest'")), 2)
+        self.assertEqual(len(self.desk.handled_floor()), 1)
+
+    def test_a_card_waiting_on_you_is_listed_once(self):
+        self.settings(digest_times=[], levels={"card_needs_input": "digest"})
+        self.start()
+        self.at_desk()
+        self.desk.poll()
+        self.block("t_once", "A110 · Pick one", hours_ago=0.2)
+        self.clock.t = at(7, 31)
+        self.at_desk()
+        self.desk.pump()
+        self.assertEqual(self.sent.to(DESK_KEY)[-1].count("A110"), 1)
 
     def test_money_the_orchestrator_handled_still_shows_in_the_brief(self):
         self.settings(digest_times=[], always_interrupt={"categories": [], "people": []})
@@ -254,6 +342,28 @@ class Responsibilities(RhythmCase):
         with self.assertRaises(watches.WatchError):
             watches.parse("card waiting on me, read it", [])
 
+    def test_words_that_end_in_a_unit_letter_are_not_durations(self):
+        for text in ("tell me if a client card is blocked and stuck over 2 hours",
+                     "card waiting on me and blocked over 2 hours", "tend to card blocked over 2 hours",
+                     "ad card blocked over 2 hours"):
+            with self.subTest(text=text):
+                self.assertEqual(watches.parse(text, [])["seconds"], 7200)
+        self.assertEqual(watches.parse("card blocked over 2h", [])["seconds"], 7200)
+        self.assertEqual(watches.parse("card blocked over a day", [])["seconds"], 86400)
+        with self.assertRaises(watches.WatchError) as cm:
+            watches.parse("card blocked over 2 hours and 30 minutes", [])
+        self.assertIn("one length of time", str(cm.exception))
+
+    def test_status_words_before_card_are_not_a_filter(self):
+        for text in ("a blocked card waiting on me over 2 hours", "any stuck card over 3 hours"):
+            with self.subTest(text=text):
+                self.assertEqual(watches.parse(text, [])["filter"], "")
+
+    def test_person_names_match_whole_words(self):
+        ppl = settings_mod.normalize({"people": [{"name": "Ed"}, {"name": "Dana Reyes"}]})["people"]
+        self.assertEqual(watches.parse("Dana Reyes not answered in 1 day", ppl)["person"], "Dana Reyes")
+        self.assertEqual(watches.parse("Ed not answered in 1 day", ppl)["person"], "Ed")
+
     def test_filter_only_matches_cards_with_the_word(self):
         self.settings(responsibilities=["tell me if a client card is blocked over 2 hours"], digest_times=[])
         self.block("t_x1", "A301 · Client logo pick", hours_ago=3)
@@ -273,9 +383,24 @@ class Responsibilities(RhythmCase):
         row = [r for r in self.desk.store.rows() if r["source"] == "watch"][0]
         self.assertIn("Dana Reyes has waited 2 days", row["title"])
         self.assertEqual(self.desk.mark_answered("dana reyes"), "Dana Reyes")
+        self.clock.advance(1)
         self.desk.inbound(platform="telegram", sender="Dana", sender_id="5", chat_id="9", message_id="m2")
         self.clock.advance(3 * 86400)
         self.assertEqual(self.desk.check_now(), 1)  # a new wait after the answer is a new breach
+
+    def test_a_second_unanswered_message_after_a_breach_is_a_new_wait(self):
+        self.settings(people=self.PEOPLE, responsibilities=["nobody waits more than two days for a reply"],
+                      digest_times=[])
+        self.desk.inbound(platform="telegram", sender="Dana", sender_id="5", chat_id="9", message_id="m1")
+        self.clock.advance(2 * 86400 + 60)
+        self.assertEqual(self.desk.check_now(), 1)
+        self.clock.advance(86400)
+        self.desk.inbound(platform="telegram", sender="Dana", sender_id="5", chat_id="9", message_id="m2")
+        self.clock.advance(1 * 86400)
+        self.assertEqual(self.desk.check_now(), 0)  # m2 has waited one day
+        self.clock.advance(1 * 86400 + 60)
+        self.assertEqual(self.desk.check_now(), 1)  # no answer seen: m2 is reported too
+        self.assertEqual(self.desk.check_now(), 0)
 
     def test_watch_card_is_made_once_and_noted_on_each_breach(self):
         fb = FakeBoard()
@@ -397,6 +522,12 @@ class Corrections(RhythmCase):
         rule, msg = notify_cmd.propose_rule(self.desk.last_alert(), self.cfg, "x", "2026-03-04")
         self.assertIsNone(rule)
         self.assertIn("stop always interrupting for money", msg)
+
+    def test_an_old_alert_is_not_a_correction_target(self):
+        self.alert()
+        self.assertIsNotNone(self.desk.last_alert())
+        self.clock.advance(86400 + 1)
+        self.assertIsNone(self.desk.last_alert())
 
     def test_a_digest_delivery_is_not_an_alert(self):
         self.at_desk()
