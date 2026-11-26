@@ -1,0 +1,33 @@
+name: front-desk
+label: Front Desk
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: >
+  Every escalation (a blocked or failed Kanban card, a scheduled job error, a message from a
+  person you named, or a lane that calls front_desk_escalate) reaches the orchestrator's live
+  session first. The orchestrator decides: handle it, or tell the boss. Your notification
+  settings decide when and where you hear: in the chat you're in when you're at the computer,
+  your phone chat when you're away and it's urgent, otherwise the next digest. Edit the settings
+  in plain words with /notify. Never messages anyone but you and approves nothing.
+author: AXIOM
+license: MIT
+tags: [notifications, escalation, triage, kanban, orchestrator, presence]
+requires_hermes: ">=0.23.3"
+platforms: [macos, linux]
+provides_hooks:
+  - pre_llm_call
+  - kanban_task_blocked
+  - kanban_task_completed
+  - on_kanban_dispatch_tick
+  - pre_gateway_dispatch
+provides_tools:
+  - front_desk_escalate
+  - front_desk_triage
+  - front_desk_status
+config_schema:
+  settings_path:
+    type: string
+    default: ""
+    label: Settings file
+    description: "Where your notification settings live. Empty = <hermes home>/plugin-data/front-desk/settings.yaml."
