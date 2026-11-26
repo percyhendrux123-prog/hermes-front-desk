@@ -150,7 +150,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
             name = str(r.get("person") or "")
             if not name or (w["person"] and name.lower() != w["person"].lower()):
                 continue
-            if r.get("status") == "handled" or float(answered.get(name.lower(), 0)) >= float(r["created_at"]):
+            if r.get("status") == "handled" or float(answered.get(name.lower(), float("-inf"))) >= float(r["created_at"]):
                 continue
             oldest.setdefault(name.lower(), r)
             newest[name.lower()] = max(newest.get(name.lower(), 0.0), float(r["created_at"]))
