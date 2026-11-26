@@ -20,6 +20,7 @@ from .store import Store
 LOCAL_SURFACES = {"cli", "tui", "desktop", "acp", "local", "gui"}
 SHOW_AGAIN_S = 600
 MAX_ATTEMPTS = 3
+LOST_CLAIM_S = 600
 
 Deliver = Callable[[str, dict], bool]  # (text, {"session_key"} | {"origin"}) -> accepted
 
@@ -40,8 +41,11 @@ class Desk:
 
     def _now_dt(self, t: float) -> datetime:
         tzname = self.settings.get("timezone") or ""
-        tz = ZoneInfo(tzname) if tzname else datetime.now().astimezone().tzinfo
-        return datetime.fromtimestamp(t, tz)
+        try:
+            tz = ZoneInfo(tzname) if tzname else None
+        except Exception:
+            tz = None  # normalize() refuses bad names; this only guards a hand-built dict
+        return datetime.fromtimestamp(t, tz or datetime.now().astimezone().tzinfo)
 
     def live_session(self) -> Optional[dict]:
         return self.store.get("live")
@@ -57,6 +61,13 @@ class Desk:
         if (user_message or "").lstrip().startswith(MARKER):
             return  # our own injection is not the user
         now = self.clock()
+        if surface not in LOCAL_SURFACES:
+            # A gateway chat is never the live session: it could be anyone's chat. Only the
+            # user's own configured phone chat counts, and only as "they're on their phone".
+            phone = policy.phone_target(self.settings) or {}
+            if phone.get("session_key") == session_key:
+                self.store.put("phone_seen", now)
+            return
         self.store.put("live", {"session_key": session_key, "surface": surface, "ts": now})
         if viewers is not None:
             self.store.put("viewers", {"ts": now, "viewers": viewers, "session_key": session_key})
@@ -66,10 +77,10 @@ class Desk:
         limit = float(s["presence"]["present_idle_minutes"]) * 60
         now = self.clock()
         live = self.live_session()
-        if live and live.get("surface") not in LOCAL_SURFACES:
-            # The user's newest typed turn came from a messaging chat: not at the computer.
-            if now - float(live.get("ts", 0)) <= limit:
-                return Presence("away", "full" if self.full_presence else "degraded", "chatting from a gateway")
+        phone_seen = self.store.get("phone_seen")
+        if phone_seen and now - float(phone_seen) <= limit and float(phone_seen) > float((live or {}).get("ts", 0)):
+            # The user's newest typed turn came from their own phone chat: not at the computer.
+            return Presence("away", "full" if self.full_presence else "degraded", "chatting from their phone")
         if self.full_presence:
             if viewers_now is not None:
                 return presence_mod.from_viewers(viewers_now, limit)
@@ -177,7 +188,8 @@ class Desk:
     # ------------------------------------------------------------------ the loop
     def pump(self) -> dict:
         """One pass: poll, wake the orchestrator, apply timeouts, deliver, send a due digest."""
-        out = {"ingested": self.poll(), "woke": self.wake(), "timed_out": self.apply_timeouts()}
+        out = {"ingested": self.poll(), "woke": self.wake(), "timed_out": self.apply_timeouts(),
+               "unconfirmed": self.reap_lost_claims()}
         out["delivered"] = self.deliver_due()
         out["digest"] = self.send_digest_if_due()
         return out
@@ -185,8 +197,7 @@ class Desk:
     def wake(self) -> int:
         """Urgent pending items go to the orchestrator's live session first, once each."""
         live = self.live_session()
-        # Only a computer session is woken. Waking a phone chat would put the triage itself on the
-        # boss's phone; there the item waits for the next turn or the triage timeout instead.
+        # Only a computer session is woken (note_turn records no other kind; checked again here).
         if not live or live.get("surface") not in LOCAL_SURFACES:
             return 0
         rows = self.store.rows("status='pending' AND level='interrupt' AND woke_at IS NULL")
@@ -208,6 +219,15 @@ class Desk:
         n = 0
         for r in self.store.rows("status='pending' AND level='interrupt' AND created_at<=?", (cutoff,)):
             n += self.store.transition(r["id"], ("pending",), status="notify", decided_by="timeout")
+        return n
+
+    def reap_lost_claims(self) -> int:
+        """A delivery claimed but never finished (the process died mid-send) is not resent, since
+        it may have arrived. It becomes 'unconfirmed' and the orchestrator is shown it once."""
+        cutoff = self.clock() - LOST_CLAIM_S
+        n = 0
+        for r in self.store.rows("status='sending' AND notified_at<=?", (cutoff,)):
+            n += self.store.transition(r["id"], ("sending",), status="unconfirmed", shown_at=None)
         return n
 
     def deliver_due(self) -> int:
@@ -281,7 +301,8 @@ class Desk:
         now = self.clock()
         pending = [r for r in self.store.rows("status='pending'")
                    if r["shown_at"] is None or now - r["shown_at"] >= SHOW_AGAIN_S]
-        fyi = self.store.rows("status IN ('logged','notify','delivered') AND shown_at IS NULL AND (status='logged' OR override=1)")
+        fyi = self.store.rows("shown_at IS NULL AND (status IN ('logged','unconfirmed') OR "
+                              "(override=1 AND status IN ('notify','delivered')))")
         if not pending and not fyi:
             return ""
         lines = ["Front desk (escalations reach you first; you decide whether the boss is told):"]
@@ -289,7 +310,7 @@ class Desk:
             lines.append("Waiting on your triage (front_desk_triage: 'handled' or 'tell_boss'):")
             lines += [_line(r) for r in pending[:8]]
         if fyi:
-            lines.append("For your information only:")
+            lines.append("For your information only ('unconfirmed' = a notice to the boss may not have arrived):")
             lines += [_line(r) for r in fyi[:8]]
         self.store.touch([r["id"] for r in pending[:8] + fyi[:8]], "shown_at", now)
         return "\n".join(lines)
@@ -306,7 +327,9 @@ class Desk:
     # ------------------------------------------------------------------ delivery
     def _target(self, channel: str, live: Optional[dict]) -> Optional[dict]:
         if channel == "in_session":
-            return {"session_key": live["session_key"]} if live else None
+            if live and live.get("surface") in LOCAL_SURFACES:
+                return {"session_key": live["session_key"]}
+            return None
         if channel == "phone":
             return policy.phone_target(self.settings)
         return None
@@ -324,6 +347,8 @@ def _join(a: str, b: str) -> str:
 
 def _line(r: Any) -> str:
     tag = CATEGORY_LABELS.get(r["category"], r["category"])
+    if r["status"] == "unconfirmed":
+        tag += ", unconfirmed"
     extra = f" ({r['detail']})" if r["detail"] else ""
     note = f" Note: {r['note']}" if r["note"] else ""
     return f"- #{r['id']} [{tag}] {r['title']}{extra}{note}"

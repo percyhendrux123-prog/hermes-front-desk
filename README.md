@@ -80,7 +80,7 @@ keywords:                    # words that move a blocked/failed card into a cate
 | Situation | What happens |
 |---|---|
 | Urgent item, you're at the computer | The orchestrator is woken in your session and triages. If it says `tell_boss`, it tells you in the same reply. |
-| Urgent item, you're away | The orchestrator triages first. If it says `tell_boss`, the notice goes to your phone chat. |
+| Urgent item, you're away | If your computer session is still open, the orchestrator is woken there and triages first. If it says `tell_boss`, the notice goes to your phone chat. With no computer session open, the item waits for the triage timeout. |
 | Urgent item, nobody triages within `timeout_minutes` | The settings decide on their own: you're told by the channel your presence picks. |
 | Digest item | The orchestrator sees it on its next turn. Anything it sends on, or doesn't triage, goes in the next digest. |
 | `log` item | The orchestrator sees it as an FYI. You are not told. |
@@ -89,7 +89,9 @@ keywords:                    # words that move a blocked/failed card into a cate
 | Quiet hours | Urgent items wait for the morning digest unless they are `always_interrupt`. Quiet hours never hide something while you're actively at the computer. |
 | No phone chat set and you're away | Urgent items go to the digest instead. Nothing is dropped. |
 
-Each escalation is one row with a unique key, so it can never alert you twice. That holds whether it arrives by a hook, a board poll, or a repeat call. Each delivery is claimed before it is sent. If the host refuses a delivery it is retried, and after three refusals the item goes to the digest. If the process dies between claiming and sending, that one notice is not resent. Missing one notice you can see in the log is better than being messaged twice.
+Each escalation is one row with a unique key, so it can never alert you twice. That holds whether it arrives by a hook, a board poll, or a repeat call. Each delivery, a single notice or a whole digest, is claimed before it is sent. If the host refuses a delivery it is retried, and after three refusals the item goes to the digest. If the process dies between claiming and sending, the notice is not resent, because it may already have arrived. After ten minutes it is marked `unconfirmed` and shown to the orchestrator, so nothing disappears silently. Missing one notice you can see is better than being messaged twice.
+
+Only a desktop, TUI or CLI session can be the live session. A gateway chat never is, because the orchestrator also answers other people there. Your own phone chat (`phone.session_key`) counts only as a sign that you're on your phone, not at the computer.
 
 ## Presence: what needs Hermes v0.23.4
 
@@ -125,15 +127,16 @@ What it reads, writes and runs, checked against the code:
 - **Reads, read-only:** the Kanban board (`kanban.db`: event kinds, card titles, block reasons, summaries), `<hermes home>/cron/jobs.json` (job name, status, error text), and `<hermes home>/state.db` (only the newest user-message timestamp in local sessions, for v0.23.3 presence).
 - **Inbound messages:** the `pre_gateway_dispatch` hook only observes. It never skips or rewrites a message, and it stores the name you gave that person and the chat id, never the message text. It records only senders you listed under `people`.
 - **Sends:** only through `ctx.inject_message`, and only to the orchestrator's live session or the phone chat you configured. It never auto-picks a chat.
-- **Background work:** a short-lived thread runs one poll-and-deliver pass, at most every 20 seconds, started from a Kanban dispatcher tick, a board event or a turn. No long-running thread, no timer of its own.
+- **Background work:** a short-lived thread runs one poll-and-deliver pass. It starts from a Kanban dispatcher tick, a turn or an inbound gateway message, at most every 20 seconds. A board event (`kanban_task_blocked` / `kanban_task_completed`) or a `front_desk_escalate` call starts one right away. There is never more than one pass at a time, no long-running thread, and no timer of its own. The gateway hook only puts the sender on an in-memory queue. That pass does the matching and storing, so the hook never touches disk.
 - **None of:** network calls, shell commands, subprocesses, Hermes child sessions, credentials, telemetry, approvals, or edits to Hermes config.
-- **Private imports**, each wrapped so it fails open: `hermes_cli.plugin_session.session_key()` (the routing key for the live session; v0.23.3 has no public form of it) and `hermes_cli.kanban_db.kanban_db_path()` (where the board is; falls back to `<hermes home>/kanban.db`).
+- **Private imports**, each wrapped so it fails open: `hermes_cli.plugin_session.session_key()` (the routing key for the live session; v0.23.3 has no public form of it), `hermes_cli.kanban_db.kanban_db_path()` (where the board is; falls back to `<hermes home>/kanban.db`), `hermes_constants.get_hermes_home()` (falls back to `$HERMES_HOME` or `~/.hermes`) and `plugins.plugin_storage.plugin_data_dir()` (falls back to `<hermes home>/plugin-data/front-desk`).
 
 ## Not covered
 
 - The phone notice is a line injected into your phone chat, so the agent there sees it and relays it. That's the only way a plugin can reach a chat today, so the wording on your phone is the agent's, not a fixed template.
 - Timer-driven work (digests, triage timeouts) runs on Kanban dispatcher ticks and turns. With no dispatcher and no activity, a digest is sent at the next tick or turn after its time.
-- A delivery claimed and then lost to a crash is not resent (see above).
+- A delivery claimed and then lost to a crash is not resent. It is shown to the orchestrator as `unconfirmed` (see above).
+- In v0.23.3 degraded mode, "at the computer" reads input in any local session of the profile, not only the orchestrator's.
 
 ## Tests
 

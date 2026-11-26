@@ -320,5 +320,50 @@ class ContextForTurn(DeskCase):
         self.assertIn(f"#{eid}", self.desk.context_for_turn())
 
 
+
+class ReviewRegressions(DeskCase):
+    def test_a_gateway_chat_never_becomes_the_live_session(self):
+        # A client's DM answered by the orchestrator must never receive the boss's notices.
+        self.desk.note_turn(session_key="agent:main:telegram:dm:client-1", surface="telegram", user_message="hi")
+        self.assertIsNone(self.desk.live_session())
+        self.desk.ingest(self.ev(category="card_done"))
+        self.desk.store.put("last_digest", self.clock() - 1)
+        self.clock.t = at(17, 1)
+        self.desk.pump()  # presence unknown -> digest channel in_session, but there is no local session
+        self.assertEqual([tg for _, tg in self.sent.sent if tg.get("session_key", "").endswith("client-1")], [])
+        self.assertEqual(self.desk.store.rows()[0]["status"], "digest")  # kept for later, never dropped
+
+    def test_in_session_needs_a_local_live_session(self):
+        self.desk.store.put("live", {"session_key": "agent:main:telegram:dm:client-1", "surface": "telegram", "ts": self.clock()})
+        self.assertIsNone(self.desk._target("in_session", self.desk.live_session()))
+
+    def test_own_phone_chat_means_away(self):
+        self.at_desk(minutes_ago=0)
+        self.clock.advance(60)
+        self.desk.note_turn(session_key=PHONE_KEY, surface="telegram", user_message="on my phone")
+        self.assertEqual(self.desk.live_session()["session_key"], DESK_KEY)
+        self.assertEqual(self.desk.presence().state, "away")
+
+    def test_bad_timezone_is_refused(self):
+        from front_desk import settings as settings_mod
+        with self.assertRaises(settings_mod.SettingsError):
+            settings_mod.normalize({"timezone": "Americas/Chicago"})
+
+    def test_lost_claim_becomes_unconfirmed_and_is_never_resent(self):
+        self.make_state_db(self.clock() - 3600)
+        eid = self.desk.ingest(self.ev(category="money"))
+        self.desk.store.transition(eid, ("notify",), status="sending", notified_at=self.clock(), channel="phone")
+        self.clock.advance(11 * 60)
+        self.desk.pump()
+        self.assertEqual(self.desk.store.row(eid)["status"], "unconfirmed")
+        self.assertEqual(self.sent.sent, [])
+        self.assertIn("unconfirmed", self.desk.context_for_turn())
+
+    def test_route_without_a_phone_chat_is_none(self):
+        from front_desk import policy
+        cfg = base_settings(phone={"session_key": ""})
+        self.assertEqual(policy.route("interrupt", "away", False, self.desk._now_dt(self.clock()), cfg), ("interrupt", "none"))
+        self.assertEqual(policy.route("interrupt", "away", False, self.desk._now_dt(self.clock()), self.cfg), ("interrupt", "phone"))
+
 if __name__ == "__main__":
     unittest.main()

@@ -44,7 +44,7 @@ class Store:
 
     @contextmanager
     def _conn(self):
-        c = sqlite3.connect(str(self.path), timeout=5.0, isolation_level=None)
+        c = sqlite3.connect(str(self.path), timeout=1.0, isolation_level=None)  # short: hooks read this too
         try:
             c.row_factory = sqlite3.Row
             c.execute("PRAGMA journal_mode=WAL")

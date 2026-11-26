@@ -151,10 +151,27 @@ class Wiring(unittest.TestCase):
         src = types.SimpleNamespace(platform=types.SimpleNamespace(value="telegram"), user_name="Dana",
                                     user_id="5", chat_id="9")
         ev = types.SimpleNamespace(source=src, message_id="77", text="SECRET-BODY-TEXT")
+        import time as _t
+        p._last_pump = _t.time()  # hold the pump thread back so the hook path is observed alone
         self.assertIsNone(ctx.hooks["pre_gateway_dispatch"](event=ev, gateway=None, session_store=None))
+        self.assertEqual(p.desk.store.rows(), [])  # the hook itself writes nothing
+        self.assertEqual(p.drain_inbound(), 1)
         rows = p.desk.store.rows()
         self.assertEqual(len(rows), 1)
         self.assertNotIn("SECRET-BODY-TEXT", json.dumps([dict(r) for r in rows]))
+
+    def test_redelivered_message_without_an_id_dedupes(self):
+        ctx = FakeCtx()
+        _, p, _, _ = load_plugin(ctx)
+        p.settings_path.write_text("people:\n  - name: Dana Reyes\n    match: [dana]\n")
+        import time as _t
+        p._last_pump = _t.time()
+        src = types.SimpleNamespace(platform="telegram", user_name="Dana", user_id="5", chat_id="9")
+        ev = types.SimpleNamespace(source=src, message_id=None, text="x")
+        ctx.hooks["pre_gateway_dispatch"](event=ev)
+        ctx.hooks["pre_gateway_dispatch"](event=ev)
+        p.drain_inbound()
+        self.assertEqual(len(p.desk.store.rows()), 1)
 
     def test_delivery_only_targets_the_given_session_or_phone(self):
         ctx = FakeCtx()

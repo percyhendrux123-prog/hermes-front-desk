@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -76,6 +77,7 @@ class Plugin:
         )
         self._pump_lock = threading.Lock()
         self._last_pump = 0.0
+        self._inbound: deque = deque(maxlen=1000)  # filled by the gateway hook, drained by the pump
 
     # -- settings: reread when the file changes; a broken file keeps the last good one
     def settings(self) -> dict:
@@ -113,6 +115,7 @@ class Plugin:
 
         def run():
             try:
+                self.drain_inbound()
                 self.desk.pump()
             except Exception:
                 log.warning("front-desk: pump failed", exc_info=True)
@@ -120,6 +123,16 @@ class Plugin:
                 self._pump_lock.release()
 
         threading.Thread(target=run, name="front-desk-pump", daemon=True).start()
+
+    def drain_inbound(self) -> int:
+        n = 0
+        while self._inbound:
+            try:
+                kw = self._inbound.popleft()
+            except IndexError:
+                break
+            n += self.desk.inbound(**kw) is not None
+        return n
 
     # -- context about the calling session
     def _session(self) -> tuple[str, str]:
@@ -190,19 +203,22 @@ class Plugin:
         self.kick()
 
     def on_gateway_message(self, event: Any = None, **kw: Any) -> None:
-        """Observer only: never skips or rewrites a message. Stores no message text."""
+        """Observer only: never skips or rewrites a message, never touches disk here (the pump
+        thread matches and stores it). Keeps no message text."""
         try:
             src = getattr(event, "source", None)
             if src is None:
                 return None
             platform = getattr(getattr(src, "platform", ""), "value", None) or str(getattr(src, "platform", ""))
-            self.desk.inbound(
-                platform=platform,
-                sender=str(getattr(src, "user_name", "") or getattr(event, "user_name", "") or ""),
-                sender_id=str(getattr(src, "user_id", "") or getattr(event, "user_id", "") or ""),
-                chat_id=str(getattr(src, "chat_id", "") or ""),
-                message_id=str(getattr(event, "message_id", "") or time.time()),
-            )
+            sender = str(getattr(src, "user_name", "") or getattr(event, "user_name", "") or "")
+            sender_id = str(getattr(src, "user_id", "") or getattr(event, "user_id", "") or "")
+            chat_id = str(getattr(src, "chat_id", "") or "")
+            mid = str(getattr(event, "message_id", "") or "")
+            if not mid:  # no platform id: one key per sender per chat per minute, so a redelivery dedupes
+                bucket = int(time.time() // 60)
+                mid = "h" + hashlib.sha256(f"{platform}|{chat_id}|{sender_id}|{bucket}".encode()).hexdigest()[:16]
+            self._inbound.append({"platform": platform, "sender": sender, "sender_id": sender_id,
+                                  "chat_id": chat_id, "message_id": mid})
             self.kick()
         except Exception:
             log.warning("front-desk: inbound observer failed open", exc_info=True)

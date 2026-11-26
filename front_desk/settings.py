@@ -114,6 +114,12 @@ def normalize(raw: dict | None) -> dict:
         for key in ("start", "end"):
             if not _HHMM.match(str(qh.get(key, ""))):
                 raise SettingsError(f"quiet_hours.{key} must look like 22:00")
+    if s.get("timezone"):
+        try:
+            from zoneinfo import ZoneInfo
+            ZoneInfo(str(s["timezone"]))
+        except Exception:
+            raise SettingsError(f"unknown timezone {s['timezone']!r} (try America/Chicago)")
     for t in s["digest_times"]:
         if not _HHMM.match(str(t)):
             raise SettingsError(f"digest time {t!r} must look like 09:00")
