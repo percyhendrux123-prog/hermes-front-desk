@@ -471,7 +471,9 @@ class Desk:
         for r in self.store.rows("status='pending' AND level!='interrupt'"):
             self.store.transition(r["id"], ("pending",), status="digest", decided_by="digest_time")
         rows = self.store.rows("status='digest'")
-        if not rows:
+        # With no morning brief, the digest is where handled money and approvals are shown.
+        handled = self.handled_floor()[:BRIEF_MAX] if self.settings.get("brief") is None else []
+        if not rows and not handled:
             self.store.put("last_digest", now)
             return 0
         pres = self.presence()
@@ -481,16 +483,21 @@ class Desk:
             return 0  # keep them for the next slot that has a channel
         mine = [r for r in rows if self.store.transition(r["id"], ("digest",), status="sending",
                                                          channel=channel, notified_at=now)]
-        if not mine:
+        if not mine and not handled:
             return 0
-        text = f"{MARKER} Digest, {len(mine)} item(s):\n" + "\n".join(_line(r) for r in mine)
+        text = f"{MARKER} Digest, {len(mine)} item(s):" + "".join("\n" + _line(r) for r in mine)
+        if handled:
+            text += "\nHandled for you (money and approvals are always shown):" + "".join(
+                "\n" + _line(r) for r in handled)
         ok = self._send(text, target)
+        if ok:
+            self.store.touch([r["id"] for r in handled], "briefed_at", now)
         for r in mine:
             self.store.transition(r["id"], ("sending",), **({"status": "delivered"} if ok else
                                                            {"status": "digest", "notified_at": None, "channel": ""}))
         if ok:
             self.store.put("last_digest", now)
-        return len(mine) if ok else 0
+        return (len(mine) + len(handled)) if ok else 0
 
     # ------------------------------------------------------------------ session context
     def context_for_turn(self) -> str:

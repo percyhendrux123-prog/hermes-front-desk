@@ -43,8 +43,9 @@ class Store:
         with self._conn() as c:
             c.executescript(SCHEMA)
             cols = {r[1] for r in c.execute("PRAGMA table_info(events)")}
-            if "briefed_at" not in cols:  # a desk.db made by 0.1.0
+            if "briefed_at" not in cols:  # a desk.db made by 0.1.0: its handled items are history
                 c.execute("ALTER TABLE events ADD COLUMN briefed_at REAL")
+                c.execute("UPDATE events SET briefed_at = created_at WHERE status = 'handled'")
 
     @contextmanager
     def _conn(self):

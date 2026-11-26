@@ -145,6 +145,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
             ))
     elif w["kind"] == "reply_wait":
         oldest: dict[str, dict] = {}
+        newest: dict[str, float] = {}
         for r in inbound:
             name = str(r.get("person") or "")
             if not name or (w["person"] and name.lower() != w["person"].lower()):
@@ -152,6 +153,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
             if r.get("status") == "handled" or float(answered.get(name.lower(), 0)) >= float(r["created_at"]):
                 continue
             oldest.setdefault(name.lower(), r)
+            newest[name.lower()] = max(newest.get(name.lower(), 0.0), float(r["created_at"]))
         for low_name, r in oldest.items():
             age = now - float(r["created_at"])
             if age < w["seconds"]:
@@ -160,7 +162,7 @@ def evaluate(w: dict, now: float, *, blocked_cards: list[dict], inbound: list[di
                 key=f"watch:{w['id']}:reply:{low_name}:{r['id']}", category="responsibility",
                 title=f"{r['person']} has waited {ago(age)} for a reply", detail=f"Your watch: {w['text']}",
                 source="watch", ref=str(r.get("ref") or ""), person=str(r["person"]), level=w["level"],
-                since=float(r["created_at"]),
+                since=newest[low_name],  # this wait covers every message so far
             ))
     return out
 

@@ -161,7 +161,7 @@ A rule moves alerts like that one (same kind, and the same person or watch if it
 
 ## Locked floors
 
-Money and sends waiting on your approval can never be set to `log` or `never`, in the file, by `/notify`, or by a rule. The validator refuses and says why: these always reach you, at least in the morning brief. If the orchestrator handles one itself, it still appears under "Handled for you" in the next brief.
+Money and sends waiting on your approval can never be set to `log` or `never`, in the file, by `/notify`, or by a rule. The validator refuses and says why: these always reach you, at least in the morning brief. If the orchestrator handles one itself, it still appears once under "Handled for you" in the next brief (or, with the brief off, the next digest).
 
 ## Known limits of the rhythms
 

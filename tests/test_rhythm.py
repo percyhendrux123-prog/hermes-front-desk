@@ -219,6 +219,44 @@ class MorningBrief(RhythmCase):
         self.assertEqual(len(self.desk.store.rows("status='digest'")), 2)
         self.assertEqual(len(self.desk.handled_floor()), 1)
 
+    def test_with_the_brief_off_handled_money_shows_in_the_digest_once(self):
+        self.settings(brief="off", digest_times=["17:00"], always_interrupt={"categories": [], "people": []})
+        self.at_desk()
+        self.desk.pump()
+        eid = self.desk.ingest(Event(key="m9", category="money", title="Refund R-30 issued"))
+        self.desk.triage(eid, "handled")
+        self.clock.t = at(17, 1)
+        self.at_desk()
+        self.desk.pump()
+        self.assertIn("Refund R-30", self.sent.to(DESK_KEY)[-1])
+        n = len(self.sent.sent)
+        self.clock.t = at(17, 1, day=5)
+        self.at_desk()
+        self.desk.pump()
+        self.assertEqual(len(self.sent.sent), n)  # shown once; nothing else to send
+
+    def test_upgrading_a_0_1_desk_db_does_not_replay_old_handled_items(self):
+        import sqlite3 as sq
+        from front_desk.store import Store
+        path = self.tmp / "old-desk.db"
+        con = sq.connect(path)
+        con.executescript("""CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE,
+            category TEXT NOT NULL, level TEXT NOT NULL, override INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT '',
+            person TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, decided_by TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, woke_at REAL, shown_at REAL, notified_at REAL,
+            channel TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+            INSERT INTO events(key, category, level, title, status, created_at)
+                VALUES ('old', 'money', 'interrupt', 'Old refund', 'handled', 1);""")
+        con.commit()
+        con.close()
+        st = Store(path)
+        Store(path)  # a second open is fine
+        self.desk.store = st
+        self.assertEqual(self.desk.handled_floor(), [])
+        self.assertIsNotNone(st.rows()[0]["briefed_at"])
+
     def test_a_card_waiting_on_you_is_listed_once(self):
         self.settings(digest_times=[], levels={"card_needs_input": "digest"})
         self.start()
@@ -401,6 +439,17 @@ class Responsibilities(RhythmCase):
         self.clock.advance(1 * 86400 + 60)
         self.assertEqual(self.desk.check_now(), 1)  # no answer seen: m2 is reported too
         self.assertEqual(self.desk.check_now(), 0)
+
+    def test_two_messages_before_a_breach_are_one_wait(self):
+        self.settings(people=self.PEOPLE, responsibilities=["nobody waits more than two days for a reply"],
+                      digest_times=[])
+        self.desk.inbound(platform="telegram", sender="Dana", sender_id="5", chat_id="9", message_id="m1")
+        self.clock.advance(HOUR)
+        self.desk.inbound(platform="telegram", sender="Dana", sender_id="5", chat_id="9", message_id="m2")
+        self.clock.advance(2 * 86400)
+        self.assertEqual(self.desk.check_now(), 1)
+        self.clock.advance(3 * HOUR)
+        self.assertEqual(self.desk.check_now(), 0)  # m2 belongs to the wait already reported
 
     def test_watch_card_is_made_once_and_noted_on_each_breach(self):
         fb = FakeBoard()
