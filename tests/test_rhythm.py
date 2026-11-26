@@ -667,5 +667,36 @@ class AlertCounter(RhythmCase):
         self.assertEqual(self.desk.status_report()["alerts_yesterday"], 3)
 
 
+class FloorPhoneUnset(RhythmCase):
+    """A digest routed to an unset phone falls back to the chat you're in."""
+
+    def test_digest_on_an_unset_phone_falls_back_to_the_chat_you_are_in(self):
+        ph = {"present": "phone", "away": "phone", "unknown": "phone"}
+        s = settings_mod.normalize({"channels": {"interrupt": ph, "digest": ph}})
+        self.assertIsNone(policy.phone_target(s))
+        for state in ("present", "away", "unknown"):
+            with self.subTest(state=state):
+                self.assertEqual(policy.route("digest", state, False, self.desk._now_dt(self.clock()), s),
+                                 ("digest", "in_session"))
+                # An interrupt still never guesses a chat; it drops to the digest instead.
+                self.assertEqual(policy.route("interrupt", state, False, self.desk._now_dt(self.clock()), s)[1],
+                                 "none")
+
+    def test_all_phone_with_phone_unset_still_delivers_money(self):
+        ph = {"present": "phone", "away": "phone", "unknown": "phone"}
+        self.cfg = settings_mod.normalize({"timezone": base_settings()["timezone"],
+                                           "channels": {"interrupt": ph, "digest": ph}})
+        eid = self.desk.ingest(Event(key="m:1", category="money", title="Refund request R-1"))
+        for i in range(104):  # ~26h of 15-minute passes, user typing at the desk every hour
+            if i % 4 == 0:
+                self.at_desk()
+            if self.desk.store.row(eid)["status"] == "pending":
+                self.desk.triage(eid, "tell_boss")
+            self.desk.pump()
+            self.clock.advance(15 * 60)
+        self.assertEqual(self.desk.store.row(eid)["status"], "delivered")
+        self.assertEqual(sum("R-1" in t for t in self.sent.to(DESK_KEY)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -111,7 +111,7 @@ keywords:                    # words that move a blocked/failed card into a cate
 | `never` item | Recorded, shown to no one. |
 | `always_interrupt` category or person | You are told now, even in quiet hours and even if the orchestrator handled it. Its note is attached. |
 | Quiet hours | Urgent items wait for the morning brief unless they are `always_interrupt`. Quiet hours never hide something while you're actively at the computer. |
-| No phone chat set and you're away | Urgent items go to the digest instead. Nothing is dropped. |
+| No phone chat set and you're away | Urgent items go to the digest instead, and the digest goes to the chat you're in. Nothing is dropped. |
 
 Each escalation is one row with a unique key, so it can never alert you twice. That holds whether it arrives by a hook, a board poll, or a repeat call. Each delivery, a single notice or a whole digest, is claimed before it is sent. If the host refuses a delivery it is retried, and after three refusals the item goes to the digest. If the process dies between claiming and sending, the notice is not resent, because it may already have arrived. After ten minutes it is marked `unconfirmed` and shown to the orchestrator, so nothing disappears silently. Missing one notice you can see is better than being messaged twice.
 
@@ -163,7 +163,7 @@ A rule moves alerts like that one (same kind, and the same person or watch if it
 
 Money and sends waiting on your approval can never be set to `log` or `never`, in the file, by `/notify`, or by a rule. The validator refuses and says why: these always reach you, at least in the morning brief. If the orchestrator handles one itself, it still appears once under "Handled for you" in the next brief (or, with the brief off, the next digest).
 
-The same floor covers channels. Every `channels.digest` state (present, away, unknown) must be `in_session` or `phone`; `none` is refused, because the digest is where a floor item ends up when nothing else can reach you. Interrupt channels may be `none`: an interrupt with no channel falls back to the digest.
+The same floor covers channels. Every `channels.digest` state (present, away, unknown) must be `in_session` or `phone`; `none` is refused, because the digest is where a floor item ends up when nothing else can reach you. Interrupt channels may be `none`: an interrupt with no channel falls back to the digest. A digest set to `phone` with no phone chat configured goes to the chat you're in instead, so it never waits on a phone that was never set up.
 
 ## Known limits of the rhythms
 

@@ -122,8 +122,10 @@ def route(urgency: str, presence: str, override: bool, now: datetime, settings: 
     """(urgency, channel) after quiet hours and presence.
 
     Quiet hours turn a non-override interrupt into a digest item. An override ignores
-    quiet hours. A phone channel with no phone chat configured becomes "none": we never
-    guess a chat, because a guessed chat could be someone else's.
+    quiet hours. A phone channel with no phone chat configured becomes "none" for an
+    interrupt (we never guess a chat, because a guessed chat could be someone else's; the
+    item falls back to the digest). For the digest, the floor's last stop, it becomes
+    "in_session" instead, so money and approvals still reach the chat you're in.
     """
     if presence not in ("present", "away", "unknown"):
         presence = "unknown"
@@ -132,7 +134,7 @@ def route(urgency: str, presence: str, override: bool, now: datetime, settings: 
         urgency = "digest"
     channel = settings["channels"][urgency][presence]
     if channel == "phone" and phone_target(settings) is None:
-        channel = "none"
+        channel = "in_session" if urgency == "digest" else "none"
     return urgency, channel
 
 
