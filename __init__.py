@@ -131,7 +131,10 @@ class Plugin:
                 kw = self._inbound.popleft()
             except IndexError:
                 break
-            n += self.desk.inbound(**kw) is not None
+            try:
+                n += self.desk.inbound(**kw) is not None
+            except Exception:  # one bad item never stops the pass
+                log.warning("front-desk: inbound item skipped", exc_info=True)
         return n
 
     # -- context about the calling session
